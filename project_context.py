@@ -98,7 +98,7 @@ _PROJECT_ROOT_MARKERS = {
 }
 
 
-def find_project_root(scan_dir: Path) -> Path:
+def find_project_root(scan_dir: Path, auto_detect: bool = True) -> Path:
     """
     Find the actual project root directory.
 
@@ -115,6 +115,9 @@ def find_project_root(scan_dir: Path) -> Path:
     # Check if scan_dir itself is a project root
     if _has_project_markers(scan_dir):
         return scan_dir
+    
+    if not auto_detect:          # ← builder passes False
+        return scan_dir           # trust the given path, don't wander
 
     # Check immediate subdirectories for project markers
     project_subdirs = []
@@ -240,7 +243,7 @@ def analyze_go(info: FileInfo):
 
 # ── Scanner ────────────────────────────────────────────────────
 
-def scan_project(base_dir: Path) -> ProjectContext:
+def scan_project(base_dir: Path, auto_detect: bool = True) -> ProjectContext:
     """
     Scan a project directory and build full context.
 
@@ -248,7 +251,7 @@ def scan_project(base_dir: Path) -> ProjectContext:
     directory containing a single project subdirectory.
     """
     # Auto-detect project root
-    actual_root = find_project_root(base_dir)
+    actual_root = find_project_root(base_dir, auto_detect=auto_detect)
     ctx = ProjectContext(base_dir=actual_root)
 
     # Load ignore patterns
@@ -683,6 +686,40 @@ def _is_orphan_candidate(fpath: str) -> bool:
 
     return True
 
+def detect_circular_imports(ctx: ProjectContext) -> list[dict]:
+    """Detect circular import cycles in the dependency graph using DFS."""
+    graph = ctx.dependency_graph
+    issues: list[dict] = []
+    reported: set[tuple] = set()
+    visited: set[str] = set()
+    rec_stack: list[str] = []
+
+    def dfs(node: str) -> None:
+        visited.add(node)
+        rec_stack.append(node)
+        for dep in graph.get(node, []):
+            if dep in rec_stack:
+                idx = rec_stack.index(dep)
+                cycle = rec_stack[idx:] + [dep]
+                key = tuple(sorted(cycle[:-1]))
+                if key not in reported:
+                    reported.add(key)
+                    issues.append({
+                        "type": "circular_import",
+                        "file": node,
+                        "message": (
+                            f"Circular import: {' → '.join(cycle)}"
+                        ),
+                        "severity": "error",
+                    })
+            elif dep not in visited:
+                dfs(dep)
+        rec_stack.pop()
+
+    for node in graph:
+        if node not in visited:
+            dfs(node)
+    return issues
 
 def validate_cross_references(ctx: ProjectContext) -> list[dict]:
     """

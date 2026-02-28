@@ -74,7 +74,7 @@ def show_diff(old_content: str, new_content: str, filepath: str):
         # Fallback if Syntax rendering fails
         console.print(Panel(
             diff_text[:2000],
-            title=f"📝 {filepath} +{additions} -{deletions}",
+            title=f"📝 {filepath} +{additions} -{{deletions}}",
             border_style="yellow",
         ))
 
@@ -109,7 +109,10 @@ def apply_search_replace(
 
     # 1. Exact match (most reliable)
     if search in content:
-        return content.replace(search, replace, 1)
+        if content.count(search) == 1:
+            return content.replace(search, replace, 1)
+        # Multiple occurrences — fall through so the LLM is forced
+        # to provide more surrounding context next attempt
 
     # 2. Strip trailing whitespace on each line and retry
     content_norm = _normalize_trailing_whitespace(content)
@@ -134,12 +137,46 @@ def apply_search_replace(
     content_lines = content.split("\n")
     search_line_count = len(search.strip().split("\n"))
 
+    if search_line_count == 0:
+        return None
+
     for i in range(len(content_lines) - search_line_count + 1):
         window = "\n".join(
             line.strip()
             for line in content_lines[i:i + search_line_count]
         )
         if window == search_stripped:
+            # Detect original indentation from the matched block
+            original_indent = ""
+            for line in content_lines[i:i + search_line_count]:
+                if line.strip():
+                    original_indent = line[: len(line) - len(line.lstrip())]
+                    break
+            # Detect indentation from the replace block
+            replace_indent = ""
+            for line in replace.split("\n"):
+                if line.strip():
+                    replace_indent = line[: len(line) - len(line.lstrip())]
+                    break
+            # Re-indent replace to match original if they differ
+            if replace_indent != original_indent:
+                re_indented = []
+                for line in replace.split("\n"):
+                    if line.strip():
+                        stripped = line.lstrip()
+                        # Calculate relative indent from the replace block
+                        line_indent = line[: len(line) - len(stripped)]
+                        if line_indent.startswith(replace_indent):
+                            extra = line_indent[len(replace_indent):]
+                        else:
+                            extra = ""
+                        re_indented.append(
+                            original_indent + extra + stripped
+                        )
+                    else:
+                        re_indented.append(line)
+                replace = "\n".join(re_indented)
+
             replace_lines = replace.split("\n")
             new_lines = (
                 content_lines[:i]
@@ -200,8 +237,8 @@ def _verify_anchor_match(
 
             # Exact match or one contains the other
             if (search_stripped == content_stripped or
-                    search_stripped in content_stripped or
-                    content_stripped in search_stripped):
+                    (search_stripped and search_stripped in content_stripped) or
+                    (content_stripped and content_stripped in search_stripped)):
                 matches += 1
 
     if total == 0:
@@ -213,24 +250,19 @@ def _verify_anchor_match(
 # ── Content Cleaning ──────────────────────────────────────────
 
 def clean_code_block(text: str) -> str:
-    """Remove markdown code fences from code blocks.
-
-    Handles:
-    - ```python / ```javascript / etc.
-    - ``` at end
-    - Multiple trailing fences
-    - Empty results
-    """
+    """Remove surrounding markdown code fences from text."""
     if not text:
         return text
-
     lines = text.split("\n")
 
-    # Remove leading fence
+    # Strip leading empty lines before fence check
+    while lines and not lines[0].strip():
+        lines = lines[1:]
+
     if lines and lines[0].strip().startswith("```"):
         lines = lines[1:]
 
-    # Remove trailing fence(s)
+    # Strip trailing fences
     while lines and lines[-1].strip().startswith("```"):
         lines.pop()
 
@@ -263,6 +295,7 @@ def parse_edit_blocks(response: str) -> list[dict]:
     - Markdown fences inside code blocks
     - Single and double quoted paths
     - Missing closing tags (fallback)
+    - <edit file="..."> variant
     """
     if not response:
         return []
@@ -270,7 +303,10 @@ def parse_edit_blocks(response: str) -> list[dict]:
     edits = []
     found_paths = set()
 
-    # Format 1: Edit blocks with search/replace
+    # Search/replace pattern used in multiple places
+    sr_pattern = r'<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE'
+
+    # Format 1: Edit blocks with search/replace — <edit path="...">
     edit_pattern = r'<edit\s+path=["\']([^"\']+)["\']>\s*(.*?)\s*</edit>'
     for match in re.finditer(edit_pattern, response, re.DOTALL):
         filepath = _normalize_edit_path(match.group(1))
@@ -280,7 +316,6 @@ def parse_edit_blocks(response: str) -> list[dict]:
         block = match.group(2)
 
         # Parse search/replace pairs within the edit block
-        sr_pattern = r'<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE'
         sr_matches = re.findall(sr_pattern, block, re.DOTALL)
 
         if sr_matches:
@@ -313,10 +348,41 @@ def parse_edit_blocks(response: str) -> list[dict]:
                 })
                 found_paths.add(filepath)
 
-    # Format 2: Unclosed edit blocks (fallback)
+    # Format 1b: Edit blocks with <edit file="..."> variant
+    edit_file_pattern = r'<edit\s+file=["\']([^"\']+)["\']>\s*(.*?)\s*</edit>'
+    for match in re.finditer(edit_file_pattern, response, re.DOTALL):
+        filepath = _normalize_edit_path(match.group(1))
+        if not filepath or filepath in found_paths:
+            continue
+
+        block = match.group(2)
+        sr_matches = re.findall(sr_pattern, block, re.DOTALL)
+
+        if sr_matches:
+            for search, replace in sr_matches:
+                search = clean_code_block(search)
+                replace = clean_code_block(replace)
+                if search.strip():
+                    edits.append({
+                        "type": "search_replace",
+                        "path": filepath,
+                        "search": search,
+                        "replace": replace,
+                    })
+            found_paths.add(filepath)
+        else:
+            content = clean_code_block(block)
+            if content.strip():
+                edits.append({
+                    "type": "full_replace",
+                    "path": filepath,
+                    "content": content,
+                })
+                found_paths.add(filepath)
+
+    # Format 2: Unclosed edit blocks (fallback) — only if nothing found yet
     if not edits:
-        unclosed_edit = r'<edit\s+file=["\']?([^"\'>\s]+)["\']?>\s*(.*?)(?=<edit\s|\Z)'
-        sr_pattern_fb = r'<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE'
+        unclosed_edit = r'<edit\s+(?:path|file)=["\']?([^"\'>\s]+)["\']?>\s*(.*?)(?=<edit\s|\Z)'
 
         for match in re.finditer(unclosed_edit, response, re.DOTALL):
             filepath = _normalize_edit_path(match.group(1))
@@ -324,7 +390,7 @@ def parse_edit_blocks(response: str) -> list[dict]:
                 continue
 
             block = match.group(2)
-            sr_matches = re.findall(sr_pattern_fb, block, re.DOTALL)
+            sr_matches = re.findall(sr_pattern, block, re.DOTALL)
 
             if sr_matches:
                 for search, replace in sr_matches:
@@ -339,8 +405,8 @@ def parse_edit_blocks(response: str) -> list[dict]:
                         })
                         found_paths.add(filepath)
 
-    # Format 3: Full file blocks
-    file_pattern = r'<file\s+path=["\']([^"\']+)["\']>\n?(.*?)</file>'
+    # Format 3: Full file blocks — <file path="...">content</file>
+    file_pattern = r'<file\s+path=["\']([^"\']+)["\']>\s*(.*?)\s*</file>'
     for match in re.finditer(file_pattern, response, re.DOTALL):
         filepath = _normalize_edit_path(match.group(1))
         if not filepath or filepath in found_paths:
@@ -348,13 +414,36 @@ def parse_edit_blocks(response: str) -> list[dict]:
 
         content = match.group(2).strip()
         content = clean_code_block(content)
-        if content.strip():
-            edits.append({
-                "type": "full_replace",
-                "path": filepath,
-                "content": content,
-            })
+        if not content.strip():
+            continue
+
+        # ── Rescue: LLM put SEARCH/REPLACE markers inside a <file> tag ──
+        # Instead of writing raw markers to disk, parse them as edits
+        sr_rescue_matches = re.findall(sr_pattern, content, re.DOTALL)
+        if sr_rescue_matches:
+            console.print(
+                f"[yellow]⚠ {filepath}: SEARCH/REPLACE markers found inside "
+                f"<file> tag — treating as <edit> automatically[/yellow]"
+            )
+            for search, replace in sr_rescue_matches:
+                search = clean_code_block(search)
+                replace = clean_code_block(replace)
+                if search.strip():
+                    edits.append({
+                        "type": "search_replace",
+                        "path": filepath,
+                        "search": search,
+                        "replace": replace,
+                    })
             found_paths.add(filepath)
+            continue
+
+        edits.append({
+            "type": "full_replace",
+            "path": filepath,
+            "content": content,
+        })
+        found_paths.add(filepath)
 
     return edits
 
@@ -515,9 +604,12 @@ def apply_edits(
             else:
                 results.append((filepath, False))
         else:
-            action = console.input(
-                f"[bold]Apply to {filepath}? (y)es / (s)kip: [/bold]"
-            ).strip().lower()
+            try:
+                action = console.input(
+                    f"[bold]Apply to {filepath}? (y)es / (s)kip: [/bold]"
+                ).strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                action = "s"
 
             if action in ("y", "yes"):
                 if _write_file(full_path, new_content, filepath):

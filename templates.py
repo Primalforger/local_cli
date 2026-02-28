@@ -8,6 +8,7 @@ Custom templates can be added by placing .yaml or .json files in
 ~/.config/localcli/templates/
 """
 
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -254,8 +255,19 @@ TEMPLATES: dict[str, dict[str, str]] = {
     },
 }
 
+# Validate built-in templates at import time (dev safety net)
+for _name, _info in TEMPLATES.items():
+    assert "description" in _info, f"Template '{_name}' missing 'description'"
+    assert "prompt" in _info, f"Template '{_name}' missing 'prompt'"
+    assert "category" in _info, f"Template '{_name}' missing 'category'"
+    assert "tech" in _info, f"Template '{_name}' missing 'tech'"
+
 
 # ── Custom Templates ───────────────────────────────────────────
+
+_custom_templates_cache: Optional[dict[str, dict[str, str]]] = None
+_custom_templates_dir_mtime: Optional[float] = None
+
 
 def _get_custom_templates_dir() -> Optional[Path]:
     """Get the custom templates directory."""
@@ -267,7 +279,7 @@ def _get_custom_templates_dir() -> Optional[Path]:
 
 
 def _load_custom_templates() -> dict[str, dict[str, str]]:
-    """Load custom templates from config directory.
+    """Load custom templates from config directory with caching.
 
     Supports .yaml and .json files with format:
     {
@@ -276,50 +288,135 @@ def _load_custom_templates() -> dict[str, dict[str, str]]:
         "tech": "...",
         "prompt": "..."
     }
+
+    Results are cached and only reloaded when the directory
+    modification time changes.
     """
+    global _custom_templates_cache, _custom_templates_dir_mtime
+
     templates_dir = _get_custom_templates_dir()
     if not templates_dir or not templates_dir.exists():
         return {}
 
-    custom = {}
+    # Check if cache is still valid
+    try:
+        current_mtime = templates_dir.stat().st_mtime
+    except OSError:
+        return _custom_templates_cache or {}
 
-    for filepath in templates_dir.iterdir():
+    if (
+        _custom_templates_cache is not None
+        and _custom_templates_dir_mtime == current_mtime
+    ):
+        return _custom_templates_cache
+
+    custom: dict[str, dict[str, str]] = {}
+
+    try:
+        entries = sorted(templates_dir.iterdir())
+    except OSError as e:
+        console.print(
+            f"[yellow]⚠ Cannot read templates directory: {e}[/yellow]"
+        )
+        return _custom_templates_cache or {}
+
+    for filepath in entries:
+        if not filepath.is_file():
+            continue
         if filepath.name.startswith("."):
             continue
 
         try:
-            if filepath.suffix == ".json":
-                import json
-                data = json.loads(filepath.read_text(encoding="utf-8"))
-            elif filepath.suffix in (".yaml", ".yml"):
-                try:
-                    import yaml
-                    data = yaml.safe_load(
-                        filepath.read_text(encoding="utf-8")
-                    )
-                except ImportError:
-                    continue
-            else:
+            data = _load_template_file(filepath)
+            if data is None:
                 continue
 
-            if not isinstance(data, dict):
-                continue
-            if "prompt" not in data:
-                continue
+            name = filepath.stem.lower().replace(" ", "-").replace("_", "-")
 
-            name = filepath.stem.lower().replace(" ", "-")
+            # Warn if overriding a built-in
+            if name in TEMPLATES:
+                console.print(
+                    f"[yellow]⚠ Custom template '{name}' shadows "
+                    f"built-in template[/yellow]"
+                )
+
             data.setdefault("description", f"Custom: {name}")
             data.setdefault("category", "custom")
             data.setdefault("tech", "")
             custom[name] = data
 
-        except Exception:
-            continue
+        except Exception as e:
+            console.print(
+                f"[yellow]⚠ Error loading template "
+                f"{filepath.name}: {e}[/yellow]"
+            )
 
+    _custom_templates_cache = custom
+    _custom_templates_dir_mtime = current_mtime
     return custom
 
 
+def _load_template_file(filepath: Path) -> Optional[dict]:
+    """Load and validate a single template file.
+
+    Returns parsed dict or None if invalid/unsupported.
+    """
+    raw = filepath.read_text(encoding="utf-8")
+
+    if filepath.suffix == ".json":
+        data = json.loads(raw)
+    elif filepath.suffix in (".yaml", ".yml"):
+        try:
+            import yaml
+        except ImportError:
+            console.print(
+                f"[dim]Skipping {filepath.name} — "
+                f"PyYAML not installed[/dim]"
+            )
+            return None
+        data = yaml.safe_load(raw)
+    else:
+        return None
+
+    if not isinstance(data, dict):
+        console.print(
+            f"[yellow]⚠ {filepath.name}: expected dict, "
+            f"got {type(data).__name__}[/yellow]"
+        )
+        return None
+
+    if "prompt" not in data or not data["prompt"]:
+        console.print(
+            f"[yellow]⚠ {filepath.name}: missing required "
+            f"'prompt' field[/yellow]"
+        )
+        return None
+
+    return data
+
+
+def invalidate_template_cache():
+    """Force reload of custom templates on next access."""
+    global _custom_templates_cache, _custom_templates_dir_mtime
+    _custom_templates_cache = None
+    _custom_templates_dir_mtime = None
+
+
 # ── Public API ─────────────────────────────────────────────────
+
+def get_all_templates() -> dict[str, dict[str, str]]:
+    """Get merged dict of built-in and custom templates.
+
+    Custom templates override built-in ones with the same name.
+    """
+    merged = dict(TEMPLATES)
+    try:
+        custom = _load_custom_templates()
+        merged.update(custom)
+    except Exception:
+        pass
+    return merged
+
 
 def get_template_prompt(
     name: str, customization: str = ""
@@ -338,39 +435,17 @@ def get_template_prompt(
 
     name = name.strip().lower()
 
-    # Check built-in first
+    # Check built-in first, then custom
     template = TEMPLATES.get(name)
-
-    # Check custom templates
     if not template:
-        custom = _load_custom_templates()
-        template = custom.get(name)
-
-    if not template:
-        # Suggest similar templates
-        all_names = list(TEMPLATES.keys())
         try:
-            all_names.extend(_load_custom_templates().keys())
+            custom = _load_custom_templates()
+            template = custom.get(name)
         except Exception:
             pass
 
-        matches = [
-            t for t in all_names
-            if name in t or t in name
-        ]
-
-        if matches:
-            console.print(
-                f"[yellow]Template '{name}' not found. "
-                f"Did you mean: {', '.join(matches)}?[/yellow]"
-            )
-        else:
-            console.print(
-                f"[red]Unknown template: {name}[/red]"
-            )
-            console.print(
-                "[dim]Use /template to see available templates[/dim]"
-            )
+    if not template:
+        _suggest_similar(name)
         return None
 
     prompt = f"Build {template['prompt']}"
@@ -381,8 +456,40 @@ def get_template_prompt(
     return prompt
 
 
+def _suggest_similar(name: str):
+    """Suggest templates with similar names."""
+    all_templates = get_all_templates()
+    all_names = list(all_templates.keys())
+
+    # Substring matches
+    matches = [
+        t for t in all_names
+        if name in t or t in name
+    ]
+
+    # Also try prefix matching for short inputs
+    if not matches and len(name) >= 2:
+        matches = [
+            t for t in all_names
+            if t.startswith(name) or name.startswith(t[:len(name)])
+        ]
+
+    if matches:
+        console.print(
+            f"[yellow]Template '{name}' not found. "
+            f"Did you mean: {', '.join(matches)}?[/yellow]"
+        )
+    else:
+        console.print(
+            f"[red]Unknown template: {name}[/red]"
+        )
+        console.print(
+            "[dim]Use /template to see available templates[/dim]"
+        )
+
+
 def get_template_info(name: str) -> Optional[dict]:
-    """Get full info about a template."""
+    """Get full info about a template including its source."""
     if not name:
         return None
 
@@ -404,7 +511,10 @@ def get_template_info(name: str) -> Optional[dict]:
 
 
 def list_templates() -> dict[str, str]:
-    """Get dict of all template names and descriptions."""
+    """Get dict of all template names and descriptions.
+
+    Custom templates are marked with (custom) suffix.
+    """
     result = {}
 
     for name, info in TEMPLATES.items():
@@ -415,6 +525,9 @@ def list_templates() -> dict[str, str]:
         for name, info in custom.items():
             if name not in result:
                 result[name] = f"{info['description']} (custom)"
+            else:
+                # Custom overrides built-in — mark it
+                result[name] = f"{info['description']} (custom override)"
     except Exception:
         pass
 
@@ -426,25 +539,28 @@ def display_templates():
     table = Table(
         title="🚀 Project Templates",
         border_style="dim",
+        show_lines=False,
     )
     table.add_column("Name", style="cyan", min_width=18)
     table.add_column("Category", style="dim", width=12)
     table.add_column("Tech Stack", style="green")
     table.add_column("Description")
 
-    # Group by category
-    categories: dict[str, list[tuple[str, dict]]] = {}
+    # Group by category — use OrderedDict pattern for stable ordering
+    categories: dict[str, list[tuple[str, dict, str]]] = {}
     for name, info in TEMPLATES.items():
         cat = info.get("category", "other")
-        categories.setdefault(cat, []).append((name, info))
+        categories.setdefault(cat, []).append((name, info, ""))
 
     # Add custom templates
     try:
         custom = _load_custom_templates()
         for name, info in custom.items():
-            if name not in TEMPLATES:
-                cat = info.get("category", "custom")
-                categories.setdefault(cat, []).append((name, info))
+            cat = info.get("category", "custom")
+            source_marker = " ★" if name not in TEMPLATES else " (override)"
+            categories.setdefault(cat, []).append(
+                (name, info, source_marker)
+            )
     except Exception:
         pass
 
@@ -454,28 +570,32 @@ def display_templates():
         "bot", "desktop", "data", "custom",
     ]
 
+    displayed_categories = set()
+
     for cat in category_order:
         templates_in_cat = categories.get(cat, [])
         if not templates_in_cat:
             continue
-        for name, info in sorted(templates_in_cat):
+        displayed_categories.add(cat)
+        for name, info, marker in sorted(templates_in_cat, key=lambda x: x[0]):
             table.add_row(
-                name,
+                name + marker,
                 cat,
                 info.get("tech", ""),
-                info["description"],
+                info.get("description", ""),
             )
 
-    # Any remaining categories not in order
-    for cat, templates in categories.items():
-        if cat not in category_order:
-            for name, info in sorted(templates):
-                table.add_row(
-                    name,
-                    cat,
-                    info.get("tech", ""),
-                    info["description"],
-                )
+    # Any remaining categories not in the predefined order
+    for cat, templates in sorted(categories.items()):
+        if cat in displayed_categories:
+            continue
+        for name, info, marker in sorted(templates, key=lambda x: x[0]):
+            table.add_row(
+                name + marker,
+                cat,
+                info.get("tech", ""),
+                info.get("description", ""),
+            )
 
     console.print()
     console.print(table)
@@ -489,10 +609,17 @@ def display_templates():
     # Show custom templates directory
     templates_dir = _get_custom_templates_dir()
     if templates_dir:
-        console.print(
-            f"\n[dim]Custom templates: {templates_dir}/ "
-            f"(add .json or .yaml files)[/dim]"
-        )
+        custom_count = len(categories.get("custom", []))
+        if custom_count:
+            console.print(
+                f"\n[dim]★ = custom template ({custom_count} loaded "
+                f"from {templates_dir}/)[/dim]"
+            )
+        else:
+            console.print(
+                f"\n[dim]Custom templates: {templates_dir}/ "
+                f"(add .json or .yaml files)[/dim]"
+            )
     console.print()
 
 
@@ -526,24 +653,43 @@ def create_custom_template(
         )
         return False
 
-    # Sanitize name
+    # Sanitize name — only allow alphanumeric, hyphens
     safe_name = name.strip().lower().replace(" ", "-").replace("_", "-")
+    # Remove any remaining unsafe characters
+    safe_name = "".join(
+        c for c in safe_name
+        if c.isalnum() or c == "-"
+    ).strip("-")
+
     if not safe_name:
-        console.print("[yellow]Empty template name[/yellow]")
+        console.print("[yellow]Invalid template name — only letters, numbers, and hyphens allowed[/yellow]")
+        return False
+
+    if len(safe_name) > 50:
+        console.print("[yellow]Template name too long (max 50 characters)[/yellow]")
         return False
 
     filepath = templates_dir / f"{safe_name}.json"
 
     if filepath.exists():
-        console.print(
-            f"[yellow]Template '{safe_name}' already exists at "
-            f"{filepath}[/yellow]"
-        )
+        try:
+            overwrite = console.input(
+                f"[yellow]Template '{safe_name}' already exists. "
+                f"Overwrite? (y/n): [/yellow]"
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            overwrite = "n"
+
+        if overwrite not in ("y", "yes"):
+            console.print("[dim]Cancelled.[/dim]")
+            return False
+
+    if not prompt or not prompt.strip():
+        console.print("[yellow]Prompt cannot be empty[/yellow]")
         return False
 
-    import json
     data = {
-        "description": description.strip(),
+        "description": description.strip() or f"Custom: {safe_name}",
         "category": "custom",
         "tech": tech.strip(),
         "prompt": prompt.strip(),
@@ -551,11 +697,13 @@ def create_custom_template(
 
     try:
         filepath.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        # Invalidate cache so new template is picked up immediately
+        invalidate_template_cache()
         console.print(
-            f"[green]✓ Created custom template: {filepath}[/green]"
+            f"[green]✓ Created custom template '{safe_name}': {filepath}[/green]"
         )
         return True
     except OSError as e:

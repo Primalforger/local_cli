@@ -1,5 +1,6 @@
 """Configuration management."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -116,17 +117,31 @@ def ensure_dirs():
 # ── YAML Handling ─────────────────────────────────────────────
 
 def _load_yaml(path: Path) -> dict:
-    """Safely load a YAML file, returning empty dict on failure."""
+    """Safely load a YAML file, returning empty dict on failure.
+
+    Falls back to JSON if PyYAML is not installed.
+    """
     try:
         import yaml
+    except ImportError:
+        # Fallback: try JSON if yaml not available
+        return _load_json_fallback(path)
+
+    if not path.exists():
+        return {}
+
+    try:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         if isinstance(data, dict):
             return data
+        if data is None:
+            # Empty YAML file
+            return {}
+        console.print(
+            f"[yellow]⚠ Config file {path} contains non-dict data, ignoring[/yellow]"
+        )
         return {}
-    except ImportError:
-        # Fallback: try JSON if yaml not available
-        return _load_json_fallback(path)
     except Exception as e:
         console.print(
             f"[yellow]⚠ Error loading config from {path}: {e}[/yellow]"
@@ -138,12 +153,27 @@ def _save_yaml(path: Path, data: dict):
     """Safely save a YAML file."""
     try:
         import yaml
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
     except ImportError:
         # Fallback: save as JSON if yaml not available
         _save_json_fallback(path, data)
+        return
+
+    try:
+        # Ensure parent directory exists
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write to temp file then rename for atomicity
+        tmp_path = path.with_suffix(".yaml.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+        tmp_path.replace(path)
     except Exception as e:
+        # Clean up temp file on failure
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
         console.print(
             f"[red]Error saving config to {path}: {e}[/red]"
         )
@@ -152,30 +182,45 @@ def _save_yaml(path: Path, data: dict):
 def _load_json_fallback(path: Path) -> dict:
     """Load config from JSON if YAML is not available."""
     json_path = path.with_suffix(".json")
-    if json_path.exists():
-        try:
-            import json
-            with open(json_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-    return {}
+    if not json_path.exists():
+        return {}
+
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        return {}
+    except (json.JSONDecodeError, OSError) as e:
+        console.print(
+            f"[yellow]⚠ Error loading JSON config {json_path}: {e}[/yellow]"
+        )
+        return {}
 
 
 def _save_json_fallback(path: Path, data: dict):
     """Save config as JSON if YAML is not available."""
-    import json
     json_path = path.with_suffix(".json")
     try:
-        with open(json_path, "w", encoding="utf-8") as f:
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+
+        tmp_path = json_path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp_path.replace(json_path)
+
         console.print(
             f"[yellow]PyYAML not installed. "
             f"Config saved as JSON: {json_path}[/yellow]"
         )
     except Exception as e:
+        # Clean up temp file on failure
+        try:
+            tmp = json_path.with_suffix(".json.tmp")
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
         console.print(f"[red]Error saving config: {e}[/red]")
 
 
@@ -195,32 +240,49 @@ def validate_config_value(key: str, value: Any) -> tuple[bool, str]:
         return False, f"Validation error for '{key}': {e}"
 
 
-def parse_config_value(key: str, value: str) -> Any:
-    """Parse a string config value to the appropriate type.
+def parse_config_value(key: str, value: Any) -> Any:
+    """Parse a config value to the appropriate type.
 
-    Used when setting config from CLI: /config key value
+    Used when setting config from CLI (/config key value)
+    or from environment variables.
     """
+    # Already the right type — skip parsing
+    if key in _BOOL_KEYS and isinstance(value, bool):
+        return value
+    if key in _INT_KEYS and isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if key in _FLOAT_KEYS and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+
+    # Convert from string
+    if not isinstance(value, str):
+        value = str(value)
+
     # Boolean keys
     if key in _BOOL_KEYS:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() in ("true", "1", "yes", "on")
-        return bool(value)
+        return value.lower().strip() in ("true", "1", "yes", "on")
 
     # Integer keys
     if key in _INT_KEYS:
         try:
             return int(value)
         except (ValueError, TypeError):
-            return DEFAULT_CONFIG.get(key, value)
+            console.print(
+                f"[yellow]⚠ Cannot parse '{value}' as integer for '{key}', "
+                f"using default[/yellow]"
+            )
+            return DEFAULT_CONFIG.get(key, 0)
 
     # Float keys
     if key in _FLOAT_KEYS:
         try:
             return float(value)
         except (ValueError, TypeError):
-            return DEFAULT_CONFIG.get(key, value)
+            console.print(
+                f"[yellow]⚠ Cannot parse '{value}' as float for '{key}', "
+                f"using default[/yellow]"
+            )
+            return DEFAULT_CONFIG.get(key, 0.0)
 
     # String keys — return as-is
     return value
@@ -245,11 +307,40 @@ def load_config() -> dict:
         if user_config:
             # Validate each value before merging
             for key, value in user_config.items():
+                # Type-coerce values loaded from YAML
+                # (YAML can load "true" as bool, "123" as int, etc.,
+                # but sometimes gets it wrong — e.g., "on"/"off" as bool)
+                if key in _BOOL_KEYS and not isinstance(value, bool):
+                    value = parse_config_value(key, value)
+                elif key in _INT_KEYS and not isinstance(value, int):
+                    value = parse_config_value(key, value)
+                elif key in _FLOAT_KEYS and not isinstance(value, (int, float)):
+                    value = parse_config_value(key, value)
+
                 is_valid, error = validate_config_value(key, value)
                 if is_valid:
                     config[key] = value
                 else:
                     console.print(f"[yellow]⚠ {error} — using default[/yellow]")
+    else:
+        # Also check for JSON fallback config
+        json_path = CONFIG_PATH.with_suffix(".json")
+        if json_path.exists():
+            user_config = _load_json_fallback(CONFIG_PATH)
+            if user_config:
+                for key, value in user_config.items():
+                    if key in _BOOL_KEYS and not isinstance(value, bool):
+                        value = parse_config_value(key, value)
+                    elif key in _INT_KEYS and not isinstance(value, int):
+                        value = parse_config_value(key, value)
+                    elif key in _FLOAT_KEYS and not isinstance(value, (int, float)):
+                        value = parse_config_value(key, value)
+
+                    is_valid, error = validate_config_value(key, value)
+                    if is_valid:
+                        config[key] = value
+                    else:
+                        console.print(f"[yellow]⚠ {error} — using default[/yellow]")
 
     # Layer 1: Environment variables (override everything)
     _apply_env_overrides(config)
@@ -267,6 +358,8 @@ def _apply_env_overrides(config: dict):
     - LOCALCLI_NUM_CTX
     - LOCALCLI_MAX_TOKENS
     - LOCALCLI_AUTO_APPLY
+    - LOCALCLI_AUTO_RUN_COMMANDS
+    - LOCALCLI_ROUTE_MODE
     """
     env_map = {
         "LOCALCLI_MODEL": "model",
@@ -275,8 +368,10 @@ def _apply_env_overrides(config: dict):
         "LOCALCLI_NUM_CTX": "num_ctx",
         "LOCALCLI_MAX_TOKENS": "max_tokens",
         "LOCALCLI_AUTO_APPLY": "auto_apply",
+        "LOCALCLI_AUTO_APPLY_FIXES": "auto_apply_fixes",
         "LOCALCLI_AUTO_RUN_COMMANDS": "auto_run_commands",
         "LOCALCLI_ROUTE_MODE": "route_mode",
+        "LOCALCLI_CONFIRM_DESTRUCTIVE": "confirm_destructive",
     }
 
     for env_key, config_key in env_map.items():
@@ -342,7 +437,10 @@ def display_config(config: dict):
             # Mask sensitive-looking values
             display_value = value
             if any(s in key.lower() for s in ("key", "token", "secret", "password")):
-                display_value = str(value)[:4] + "..." if value else "(empty)"
+                if value:
+                    display_value = str(value)[:4] + "..."
+                else:
+                    display_value = "(empty)"
 
             console.print(
                 f"  [cyan]{key}[/cyan]: [green]{display_value}[/green] "
@@ -353,7 +451,7 @@ def display_config(config: dict):
 
 
 def get_config_value(config: dict, key: str, default: Any = None) -> Any:
-    """Safely get a config value with fallback."""
+    """Safely get a config value with fallback to DEFAULT_CONFIG then default."""
     value = config.get(key)
     if value is None:
         value = DEFAULT_CONFIG.get(key, default)

@@ -15,7 +15,7 @@ from rich.syntax import Syntax
 
 from planner import STEP_SYSTEM_PROMPT
 from project_context import (
-    scan_project, build_context_summary, build_file_map,
+    scan_project, build_context_summary, build_file_map
 )
 from git_integration import (
     auto_commit, create_checkpoint, init_repo, is_git_repo,
@@ -130,7 +130,37 @@ CRITICAL RULES:
 - For new files, include complete content — no placeholders
 - Include proper imports, error handling, type hints
 - Make it production-ready but minimal (MVP)
-- Handle ALL files listed in files_to_create"""
+- Handle ALL files listed in files_to_create
+
+FILE PERSISTENCE RULES (apply to ANY project that reads/writes files in __init__ or load):
+- Any class that loads from a file in __init__ MUST accept a data_file=None parameter
+  that enables in-memory mode (self.tasks = [] with no file I/O)
+- load_tasks() MUST guard: if self.data_file and os.path.exists(self.data_file)
+- save_tasks() MUST guard: if self.data_file: (skip all I/O when data_file is None)
+- NEVER call os.path.exists(self.data_file) without first checking self.data_file is not None
+- Tests MUST instantiate with data_file=None — NEVER use the default file path in tests
+- Tests MUST use setUp() to create a fresh instance and tearDown() to delete any leftover
+  data files: if os.path.exists('data.json'): os.remove('data.json')
+- NEVER call the real constructor with its default file path in a test — stale data from
+  prior runs will accumulate and cause "list contains N additional elements" failures
+
+
+WEB APPLICATION RULES (apply when tech stack includes flask/fastapi/django/express):
+- Tests MUST use an in-memory or isolated test database — NEVER the production database
+  - Flask/SQLAlchemy: app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+  - FastAPI: override the 'get_db' dependency in tests to use a fresh in-memory session
+  - Django: use TestCase (auto-wraps in transactions) or override DATABASES in settings
+- Tests MUST use the framework's test client — NEVER start a real server or bind a port
+  - Flask: client = app.test_client() with app.config['TESTING'] = True
+  - FastAPI: client = TestClient(app)
+  - Express: use supertest(app) — do NOT call app.listen() in tests
+- Every test class needs setUp() to create fresh tables/state and tearDown() to drop them
+- Mock ALL external services (email, payment APIs, S3, third-party HTTP calls) — never make
+  real network calls in tests; use unittest.mock.patch or pytest monkeypatch
+- Environment variables required by the app must have safe test defaults in conftest.py
+  or setUp() — never let a missing env var crash a test
+- Route handlers must validate input and return proper HTTP status codes (400 for bad input,
+  401 for unauthenticated, 404 for not found) — tests should assert the exact status code"""
 
 FIX_SYSTEM_PROMPT = """You are a senior developer fixing code errors.
 
@@ -141,11 +171,16 @@ Error:
 Command: {command}
 Exit code: {returncode}
 
-STDOUT:
+TEST OUTPUT (this is runtime output ONLY — NEVER copy these lines into SEARCH blocks.
+Lines starting with > or E are pytest markers, NOT source code):
+---BEGIN TEST OUTPUT---
 {stdout}
+---END TEST OUTPUT---
 
 STDERR:
+---BEGIN STDERR---
 {stderr}
+---END STDERR---
 
 Current project files:
 {file_contents}
@@ -173,7 +208,44 @@ CRITICAL RULES:
 - Make the SMALLEST change that fixes the error
 - Don't rewrite entire files unless absolutely necessary
 - If a dependency is missing, update requirements.txt/package.json
-- Fix root causes, not symptoms"""
+- Fix root causes, not symptoms
+- SEARCH blocks must include at least 3-5 lines of surrounding context
+- NEVER use a single-line SEARCH block — it may match the wrong location in the file
+- If two tests share similar assertion lines, include the FULL test method in the SEARCH block
+- A SEARCH block is only safe when its content is UNIQUE in the entire file
+
+PYTEST OUTPUT RULES (critical — violations cause infinite fix loops):
+- The TEST OUTPUT section above is RUNTIME OUTPUT ONLY — it is NOT source code
+- NEVER copy lines starting with >, E, ?, or _ from pytest output into a SEARCH block
+- Those characters are pytest markers and do NOT exist in any source file
+- The only valid source for SEARCH block content is the "Current project files" section above
+
+ASSERTION ERROR RULES:
+- If the error is AssertionError: the SOURCE CODE logic is wrong, not the test
+- NEVER change test assertions (assertEqual, assertTrue, etc.) to match broken behavior
+- NEVER change expected values in tests to make them pass — fix the implementation instead
+- If tests fail due to unexpected extra data (e.g. "list contains N additional elements"),
+  the cause is shared state — add setUp/tearDown to isolate each test, or use temp files
+
+WEB APP TEST FAILURE RULES:
+- HTTP 404 in test: the route is not registered or the URL path is wrong — check app.route()
+  decorators and blueprint registration; do NOT change the test URL to a wrong one
+- HTTP 401/403 in test: the test client is missing auth headers or the test user lacks
+  permissions — add the correct Authorization header or log in before the request
+- HTTP 422/400 in test: request body is malformed — check Content-Type header and JSON shape
+- HTTP 500 in test: unhandled exception in a route handler — read the full traceback in
+  stderr, find the route function, and fix the bug in it
+- ConnectionRefusedError in test: the test is trying to connect to a REAL server that isn't
+  running — replace with Flask test_client() / FastAPI TestClient / supertest; NEVER call
+  requests.get('http://localhost:...') in tests
+- IntegrityError / UniqueViolation: tests are sharing database state — add db.drop_all() +
+  db.create_all() in setUp, or db.session.rollback() + db.drop_all() in tearDown
+- OperationalError 'no such table': the test DB was not initialized — call db.create_all()
+  inside setUp() AFTER setting the in-memory URI
+- KeyError on os.environ / os.getenv: a required env var is missing in the test environment —
+  set it in setUp() with os.environ['KEY'] = 'test_value' or patch with unittest.mock.patch.dict
+- OSError 'address already in use': a test is calling app.run() or server.listen() — remove
+  all server start calls from test files; use test clients only"""
 
 
 # ── Path Utilities ─────────────────────────────────────────────
@@ -235,10 +307,15 @@ def clean_file_content(content: str, filepath: str) -> str:
 
     lines = content.split("\n")
 
+    # Strip leading empty lines BEFORE fence detection
+    while lines and not lines[0].strip():
+        lines = lines[1:]
+
     if lines and lines[0].strip().startswith("```"):
         while lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
-        while lines and lines[-1].strip() == "```":
+        # Use startswith, not ==, to also catch ```python on trailing lines
+        while lines and lines[-1].strip().startswith("```"):
             lines.pop()
 
     if not lines:
@@ -390,7 +467,7 @@ def _is_missing_dependency_error(
     stderr: str, stdout: str
 ) -> bool:
     """Check if an error is caused by a missing dependency.
-    
+
     Note: This does basic pattern matching. The diagnosis in
     chat.py does deeper analysis to distinguish local imports
     from pip packages. This is just the quick check.
@@ -1082,9 +1159,12 @@ def _handle_existing_file(
             f"{old_lines} → {new_lines} lines[/yellow]"
         )
 
-    action = console.input(
-        f"[bold]Apply to {filepath}? (y/n): [/bold]"
-    ).strip().lower()
+    try:
+        action = console.input(
+            f"[bold]Apply to {filepath}? (y/n): [/bold]"
+        ).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        action = "n"
 
     if action in ("y", "yes"):
         write_project_file(base_dir, filepath, content)
@@ -1119,9 +1199,12 @@ def _handle_new_file(
             f"[dim]({line_count} lines)[/dim]"
         )
 
-    action = console.input(
-        f"[bold]Create {filepath}? (y/e/s): [/bold]"
-    ).strip().lower()
+    try:
+        action = console.input(
+            f"[bold]Create {filepath}? (y/e/s): [/bold]"
+        ).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        action = "s"
 
     if action in ("y", "yes"):
         write_project_file(base_dir, filepath, content)
@@ -1233,10 +1316,14 @@ def auto_fix(
     project_summary = "(Error scanning project)"
     issues_text = ""
     try:
-        ctx = scan_project(base_dir)
+        ctx = scan_project(base_dir, auto_detect=False)
         project_summary = build_context_summary(
             ctx, max_chars=8000
         )
+        circular_issues = [
+            i for i in ctx.issues
+            if i.get("type") == "circular_import"
+        ]
         if ctx.issues:
             issues_text = "\n\nKnown project issues:\n"
             for issue in ctx.issues[:10]:
@@ -1244,6 +1331,24 @@ def auto_fix(
                     f"  - [{issue.get('type', '?')}] "
                     f"{issue.get('message', '')}\n"
                 )
+        if circular_issues:
+            issues_text += (
+                "\n\n" + "=" * 60 + "\n"
+                "⚠ CIRCULAR IMPORT DETECTED:\n"
+            )
+            for ci in circular_issues:
+                issues_text += f"  {ci['message']}\n"
+            issues_text += (
+                "\n🔧 HOW TO FIX CIRCULAR IMPORTS:\n"
+                "- Imports must flow ONE direction only\n"
+                "- The entry-point file imports the manager/logic\n"
+                "- The manager/logic file must NOT import the entry-point\n"
+                "- Remove any import in the lower-level module that points back up\n"
+                "- If shared code is needed, move it to a third utility module\n"
+                "🚫 DO NOT add lazy/deferred imports inside functions as the fix\n"
+                "🚫 DO NOT hollow out classes to dodge the import — keep all methods\n"
+                + "=" * 60 + "\n"
+            )
     except Exception as e:
         console.print(
             f"[yellow]⚠ Error scanning project: "
@@ -1327,6 +1432,130 @@ def auto_fix(
             f"🔧 HOW TO FIX:\n{diagnosis['fix_guidance']}\n"
             + "=" * 60
         )
+    elif diagnosis["error_type"] == "connection_refused":
+        system += (
+            "\n\n" + "=" * 60 + "\n"
+            "⚠ ERROR DIAGNOSIS: ConnectionRefusedError — real server not running\n\n"
+            "The test is making a REAL HTTP request to a local server that isn't running.\n"
+            "This is always wrong in unit/integration tests.\n\n"
+            "🔧 HOW TO FIX:\n"
+            "- Remove any requests.get/post('http://localhost:...') calls from tests\n"
+            "- Flask: use client = app.test_client() then client.get('/route')\n"
+            "- FastAPI: use client = TestClient(app) then client.get('/route')\n"
+            "- Express/Node: use supertest(app).get('/route') — NOT app.listen()\n"
+            "🚫 NEVER start a real server in tests (no app.run(), no server.listen())\n"
+            + "=" * 60
+        )
+    elif diagnosis["error_type"] == "db_integrity_error":
+        system += (
+            "\n\n" + "=" * 60 + "\n"
+            "⚠ ERROR DIAGNOSIS: Database IntegrityError — shared test state\n\n"
+            "Tests are sharing database state. A previous test left rows behind\n"
+            "that violate a UNIQUE or NOT NULL constraint in the next test.\n\n"
+            "🔧 HOW TO FIX:\n"
+            "- Add setUp(): db.drop_all(); db.create_all() to reset tables before each test\n"
+            "- Add tearDown(): db.session.remove(); db.drop_all() to clean up after each test\n"
+            "- Use 'sqlite:///:memory:' as the test DB URI so each run starts fresh\n"
+            "- For Django: use TestCase (auto-wraps each test in a transaction + rollback)\n"
+            "🚫 DO NOT change unique constraints or remove validation to dodge this error\n"
+            + "=" * 60
+        )
+    elif diagnosis["error_type"] == "db_table_missing":
+        system += (
+            "\n\n" + "=" * 60 + "\n"
+            "⚠ ERROR DIAGNOSIS: OperationalError — test database not initialized\n\n"
+            "The test database exists but its tables haven't been created yet.\n\n"
+            "🔧 HOW TO FIX:\n"
+            "- In setUp(): set the test DB URI FIRST, then call db.create_all()\n"
+            "  Example: app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'\n"
+            "           with app.app_context(): db.create_all()\n"
+            "- Ensure create_all() runs inside the app context (use 'with app.app_context():')\n"
+            "- For FastAPI/SQLModel: call SQLModel.metadata.create_all(engine) in setUp\n"
+            + "=" * 60
+        )
+    elif diagnosis["error_type"] == "missing_env_var":
+        system += (
+            "\n\n" + "=" * 60 + "\n"
+            "⚠ ERROR DIAGNOSIS: Missing environment variable in test\n\n"
+            f"Variable '{diagnosis['missing_module']}' is not set in the test environment.\n\n"
+            f"🔧 HOW TO FIX:\n{diagnosis['fix_guidance']}\n"
+            + "=" * 60
+        )
+    elif diagnosis["error_type"] == "shared_file_state":
+        system += (
+            "\n\n" + "=" * 60 + "\n"
+            "⚠ ERROR DIAGNOSIS: Shared file state between tests\n\n"
+            "Tests are loading stale data from a persistent file (e.g. tasks.json).\n"
+            "Every time TodoManager() (or equivalent) is constructed, it loads ALL\n"
+            "previously saved data from disk — causing lists to grow across test runs.\n\n"
+            "🔧 HOW TO FIX (make ALL three changes):\n\n"
+            "1. Add data_file=None support to the class __init__:\n"
+            "       def __init__(self, data_file='tasks.json'):\n"
+            "           self.data_file = data_file\n"
+            "           self.tasks = []\n"
+            "           if data_file:\n"
+            "               self.load_tasks()\n\n"
+            "2. Update save_tasks() to skip saving when data_file is None:\n"
+            "       def save_tasks(self):\n"
+            "           if self.data_file:\n"
+            "               with open(self.data_file, 'w') as f: ...\n\n"
+            "3. Fix every test class — add setUp and tearDown:\n"
+            "       def setUp(self):\n"
+            "           self.manager = TodoManager(data_file=None)\n"
+            "       def tearDown(self):\n"
+            "           if os.path.exists('tasks.json'):\n"
+            "               os.remove('tasks.json')\n\n"
+            "🚫 DO NOT change assertEqual expected values to match the bloated list\n"
+            "🚫 DO NOT delete tasks from the list in tearDown — use data_file=None\n"
+            "🚫 This same pattern applies to ANY class that loads from a file on init\n"
+            + "=" * 60
+        )
+    elif any(p in stdout + stderr for p in (
+        "AssertionError: assert 404", "AssertionError: assert 401",
+        "AssertionError: assert 403", "AssertionError: assert 422",
+        "AssertionError: assert 500", "status code was",
+        "assert response.status_code",
+    )):
+        code_match = re.search(r'assert\s+(\d{3})', stdout + stderr)
+        actual_code = code_match.group(1) if code_match else "unexpected"
+        http_hints = {
+            "404": "Route not registered or URL path is wrong — check @app.route() decorators and blueprint registration.",
+            "401": "Missing or invalid auth — add Authorization header to the test request or log in first.",
+            "403": "Authenticated but not authorized — check permissions/roles for the test user.",
+            "422": "Request body is malformed — check Content-Type header and JSON field names/types.",
+            "500": "Unhandled exception in route handler — read the full stderr traceback and fix the handler.",
+        }
+        hint = http_hints.get(actual_code, "Check route registration, auth, and request format.")
+        system += (
+            "\n\n" + "=" * 60 + "\n"
+            f"⚠ ERROR DIAGNOSIS: HTTP {actual_code} response in test\n\n"
+            f"🔧 HOW TO FIX:\n{hint}\n\n"
+            "RULES:\n"
+            "- Fix the SOURCE CODE (route handler, auth middleware, or input validation)\n"
+            "- NEVER change the expected status code in the test to match a broken response\n"
+            "- NEVER disable auth or validation just to make the test pass\n"
+            + "=" * 60
+        )
+    elif "AssertionError" in stdout or "AssertionError" in stderr or (
+        "assert" in stdout.lower() and "failed" in stdout.lower()
+    ):
+        system += (
+            "\n\n" + "=" * 60 + "\n"
+            "⚠ ERROR DIAGNOSIS: AssertionError — test logic failure\n\n"
+            "The test ran successfully but got the WRONG result.\n"
+            "This means the SOURCE CODE implementation is incorrect.\n\n"
+            "🔧 HOW TO FIX:\n"
+            "- Read the AssertionError message: it shows expected vs actual values\n"
+            "- Fix the implementation in the source file to produce the correct value\n"
+            "- DO NOT change test assertions to match wrong output\n"
+            "- DO NOT change expected values in assertEqual/assertTrue calls\n\n"
+            "🚫 COMMON MISTAKE — test isolation failure:\n"
+            "If error says 'list contains N additional elements' or shows stale data,\n"
+            "the tests are sharing state (e.g. a tasks.json file not cleaned up).\n"
+            "FIX: Add setUp() that resets state and tearDown() that deletes temp files.\n"
+            "Use data_file=None or a temp path in tests, never the real data file.\n"
+            + "=" * 60
+        )
     elif _is_missing_dependency_error(stderr, stdout) and not diagnosis["is_local_import"]:
         system += (
             "\n\nThis appears to be a MISSING DEPENDENCY error. "
@@ -1338,7 +1567,7 @@ def auto_fix(
             "reinstalled automatically after you fix this."
         )
 
-    if attempt >= 2:
+    if attempt >= 3:
         system += (
             "\n\nIMPORTANT: Previous edit attempts FAILED. "
             "Use <file> tags with COMPLETE file contents. "
@@ -1382,31 +1611,29 @@ def auto_fix(
 
     # ── Safety check: block requirements.txt changes for local import errors ──
     if diagnosis["is_local_import"]:
-        if "requirements.txt" in full_response and "<file" in full_response.lower():
-            # Check if the LLM is trying to modify requirements.txt
-            req_match = re.search(
-                r'<(?:file|edit)\s+path=["\']requirements\.txt["\']>',
-                full_response,
-                re.IGNORECASE,
+        req_match = re.search(
+            r'<(?:file|edit)\s+path=["\']requirements\.txt["\']>',
+            full_response,
+            re.IGNORECASE,
+        )
+        if req_match:
+            console.print(
+                "[yellow]⚠ LLM tried to modify requirements.txt "
+                "for a local import error — BLOCKED[/yellow]"
             )
-            if req_match:
-                console.print(
-                    "[yellow]⚠ LLM tried to modify requirements.txt "
-                    "for a local import error — BLOCKED[/yellow]"
-                )
-                # Strip out the requirements.txt change
-                full_response = re.sub(
-                    r'<file\s+path=["\']requirements\.txt["\']>.*?</file>',
-                    '',
-                    full_response,
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
-                full_response = re.sub(
-                    r'<edit\s+path=["\']requirements\.txt["\']>.*?</edit>',
-                    '',
-                    full_response,
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
+            # Strip out the requirements.txt change
+            full_response = re.sub(
+                r'<file\s+path=["\']requirements\.txt["\']>.*?</file>',
+                '',
+                full_response,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            full_response = re.sub(
+                r'<edit\s+path=["\']requirements\.txt["\']>.*?</edit>',
+                '',
+                full_response,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
 
     fix_config = dict(config)
     if config.get("auto_apply_fixes", False):
@@ -1416,6 +1643,13 @@ def auto_fix(
         full_response, base_dir, created_files,
         config=fix_config, plan=plan,
     )
+
+    if not wrote and attempt >= 3:
+        console.print(
+            "[red]⚠ Full rewrite produced no changes — "
+            "LLM is stuck. Breaking fix loop.[/red]"
+        )
+        return False
 
     # If a dependency file was modified, auto-reinstall
     if wrote:
@@ -1440,16 +1674,22 @@ def handle_validation_failure(stage_name: str) -> bool:
         f"\n[bold red]❌ {stage_name} still failing "
         f"after {MAX_FIX_ATTEMPTS} attempts.[/bold red]"
     )
-    action = console.input(
-        "[bold](c)ontinue / (q)uit build: [/bold]"
-    ).strip().lower()
+    try:
+        action = console.input(
+            "[bold](c)ontinue / (q)uit build: [/bold]"
+        ).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        action = "q"
     return action in ("c", "continue")
 
 
 def ask_continue() -> bool:
-    action = console.input(
-        "[bold](r)etry / (c)ontinue / (q)uit: [/bold]"
-    ).strip().lower()
+    try:
+        action = console.input(
+            "[bold](r)etry / (c)ontinue / (q)uit: [/bold]"
+        ).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        action = "q"
     return action not in ("q", "quit")
 
 
@@ -1472,10 +1712,10 @@ def run_validation_pipeline(
         if install_cmds:
             if isinstance(install_cmds, str):
                 install_cmds = [install_cmds]
-            for cmd in install_cmds:
-                stages.append((
-                    "Install Dependencies", "command", cmd
-                ))
+            labels = ["Create Virtualenv", "Install Dependencies"]
+            for i, cmd in enumerate(install_cmds):
+                label = labels[i] if i < len(labels) else f"Install Step {i+1}"
+                stages.append((label, "command", cmd))
 
     if project_info.get("build_cmd"):
         stages.append((
@@ -1557,7 +1797,7 @@ def _validate_xref(
     stage_name, attempt,
 ) -> bool:
     try:
-        ctx = scan_project(base_dir)
+        ctx = scan_project(base_dir, auto_detect=False)
     except Exception as e:
         console.print(
             f"  [yellow]⚠ Scan error: {e}[/yellow]"
@@ -1623,7 +1863,7 @@ def _validate_syntax(
     stage_name, attempt,
 ) -> bool:
     try:
-        ctx = scan_project(base_dir)
+        ctx = scan_project(base_dir, auto_detect=False)
     except Exception as e:
         console.print(
             f"  [yellow]⚠ Scan error: {e}[/yellow]"
@@ -1632,7 +1872,7 @@ def _validate_syntax(
 
     syntax_errors = []
     for fpath, info in ctx.files.items():
-        if info.errors:
+        if hasattr(info, 'errors') and info.errors:
             syntax_errors.extend(
                 (fpath, err) for err in info.errors
             )
@@ -1700,12 +1940,9 @@ def _validate_command(
     stderr_text = result.get("stderr", "")
     stdout_text = result.get("stdout", "")
 
-    if stderr_text:
-        console.print(Panel(
-            stderr_text[:1000],
-            title="Error",
-            border_style="red",
-        ))
+    output_to_show = stderr_text or stdout_text
+    if output_to_show:
+        console.print(Panel(output_to_show[:1500], title="Error", border_style="red"))
 
     # ── Diagnose the error ─────────────────────────────
     combined = f"{stdout_text}\n{stderr_text}"
@@ -1780,7 +2017,7 @@ def _validate_command(
         )
         try:
             created_files.update(
-                build_file_map(scan_project(base_dir))
+                build_file_map(scan_project(base_dir, auto_detect=False))
             )
         except Exception:
             pass
@@ -1814,7 +2051,7 @@ def generate_step_code(
                     "[dim]Scanning project for "
                     "context...[/dim]"
                 )
-            ctx = scan_project(base_dir)
+            ctx = scan_project(base_dir, auto_detect=False)
             if ctx.issues and _show_thinking():
                 console.print(
                     f"[yellow]Found {len(ctx.issues)} "
@@ -2081,21 +2318,36 @@ def build_plan(
             return
     elif output_dir:
         base_dir = Path(output_dir).resolve()
+        # Fresh build — clear any stale progress files
+        for stale in [
+            Path.cwd() / ".build_progress.json",
+            Path(output_dir) / ".build_progress.json",
+        ]:
+            try:
+                if stale.exists():
+                    stale.unlink()
+                    console.print(
+                        f"[dim]Cleared stale progress: "
+                        f"{stale}[/dim]"
+                    )
+            except Exception:
+                pass
     else:
         base_dir = Path.cwd() / project_name
-        nested = base_dir / project_name
-        if nested.exists():
-            console.print(
-                f"[yellow]Warning: {project_name}/ "
-                f"already exists inside "
-                f"{base_dir}[/yellow]"
-            )
-            use_existing = console.input(
-                f"[bold]Build inside {base_dir} "
-                f"directly? (y/n): [/bold]"
-            ).strip().lower()
-            if use_existing not in ("y", "yes"):
-                base_dir = nested
+        # Fresh build — clear any stale progress files
+        for stale in [
+            Path.cwd() / ".build_progress.json",
+            (Path.cwd() / project_name) / ".build_progress.json",
+        ]:
+            try:
+                if stale.exists():
+                    stale.unlink()
+                    console.print(
+                        f"[dim]Cleared stale progress: "
+                        f"{stale}[/dim]"
+                    )
+            except Exception:
+                pass
 
     project_info = detect_project_type(base_dir, plan)
     steps = plan.get("steps", [])
@@ -2132,14 +2384,18 @@ def build_plan(
         "  [dim]3) No auto-test (manual)[/dim]"
     )
 
-    if is_resuming:
-        build_mode = console.input(
-            "[bold]Choose (1/2/3) [default=2]: [/bold]"
-        ).strip()
-    else:
-        build_mode = console.input(
-            "[bold]Choose (1/2/3): [/bold]"
-        ).strip()
+    try:
+        if is_resuming:
+            build_mode = console.input(
+                "[bold]Choose (1/2/3) [default=2]: [/bold]"
+            ).strip()
+        else:
+            build_mode = console.input(
+                "[bold]Choose (1/2/3): [/bold]"
+            ).strip()
+    except (KeyboardInterrupt, EOFError):
+        console.print("[yellow]Build cancelled.[/yellow]")
+        return
 
     if build_mode not in ("1", "2", "3"):
         build_mode = "2"
@@ -2149,10 +2405,13 @@ def build_plan(
 
     # Only ask confirmation for fresh builds
     if not is_resuming:
-        answer = console.input(
-            "\n[bold]Create project and begin? "
-            "(y/n): [/bold]"
-        ).strip().lower()
+        try:
+            answer = console.input(
+                "\n[bold]Create project and begin? "
+                "(y/n): [/bold]"
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            answer = "n"
         if answer not in ("y", "yes"):
             console.print(
                 "[yellow]Build cancelled.[/yellow]"
@@ -2264,10 +2523,13 @@ def build_plan(
             border_style="blue",
         ))
 
-        action = console.input(
-            "\n[bold](g)enerate / (s)kip / "
-            "(q)uit: [/bold]"
-        ).strip().lower()
+        try:
+            action = console.input(
+                "\n[bold](g)enerate / (s)kip / "
+                "(q)uit: [/bold]"
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            action = "q"
 
         if action in ("q", "quit"):
             save_progress(plan, step_id, base_dir)
@@ -2299,10 +2561,13 @@ def build_plan(
             console.print(
                 "[yellow]No changes applied.[/yellow]"
             )
-            retry = console.input(
-                "[bold]Retry generation? "
-                "(y/n): [/bold]"
-            ).strip().lower()
+            try:
+                retry = console.input(
+                    "[bold]Retry generation? "
+                    "(y/n): [/bold]"
+                ).strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                retry = "n"
             if retry in ("y", "yes"):
                 response = generate_step_code(
                     plan, step, created_files,

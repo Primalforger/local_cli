@@ -8,7 +8,7 @@ import subprocess
 import httpx
 from rich.console import Console
 
-from tools import TOOL_MAP, TOOL_DESCRIPTIONS, validate_file_references, is_tool_read_only
+from tools import TOOL_MAP, TOOL_DESCRIPTIONS, validate_file_references
 from context_manager import (
     ContextBudget, smart_compact, condense_file_contents,
     estimate_message_tokens,
@@ -87,11 +87,114 @@ def diagnose_test_error(error_output: str) -> dict:
         stripped = line.strip()
         if stripped.startswith(("ModuleNotFoundError:", "ImportError:",
                                 "SyntaxError:", "IndentationError:",
-                                "NameError:", "AttributeError:")):
+                                "NameError:", "AttributeError:",
+                                "ConnectionRefusedError:")):
             error_line = stripped
             break
 
     if not error_line:
+        # Check for non-exception error patterns before giving up
+        # ── Shared file state (accumulated tasks.json / data file between tests) ──
+        additional_match = re.search(
+            r'First list contains (\d+) additional elements', error_output
+        )
+        if additional_match or "First extra element" in error_output:
+            count = additional_match.group(1) if additional_match else "multiple"
+            diagnosis["error_type"] = "shared_file_state"
+            diagnosis["root_cause"] = (
+                f"Tests are loading stale data from a persistent file (e.g. tasks.json). "
+                f"The list has {count} extra elements left over from previous test runs. "
+                f"Each test instantiates the class and it loads ALL prior data from disk."
+            )
+            diagnosis["fix_guidance"] = (
+                "1. Add data_file=None support to the class __init__:\n"
+                "     def __init__(self, data_file='tasks.json'):\n"
+                "         self.data_file = data_file\n"
+                "         self.tasks = []\n"
+                "         if data_file: self.load_tasks()\n"
+                "2. In every test, use setUp():\n"
+                "     def setUp(self):\n"
+                "         self.manager = TodoManager(data_file=None)\n"
+                "3. In tearDown(), delete any leftover data files:\n"
+                "     def tearDown(self):\n"
+                "         if os.path.exists('tasks.json'): os.remove('tasks.json')\n"
+                "4. Delete the existing tasks.json from the project root right now.\n"
+                "DO NOT change test assertions — fix the class and test setup instead."
+            )
+            return diagnosis
+
+        # ── ConnectionRefusedError (can appear without traceback) ──
+        if "ConnectionRefusedError" in error_output or "Connection refused" in error_output:
+            diagnosis["error_type"] = "connection_refused"
+            diagnosis["root_cause"] = (
+                "Test is connecting to a real server that isn't running. "
+                "Unit/integration tests must use the framework's test client, not real HTTP."
+            )
+            diagnosis["fix_guidance"] = (
+                "Replace all requests.get/post('http://localhost:...') with:\n"
+                "  Flask: client = app.test_client(); client.get('/route')\n"
+                "  FastAPI: client = TestClient(app); client.get('/route')\n"
+                "Remove any app.run() or server.listen() calls from test files."
+            )
+            return diagnosis
+
+        # ── IntegrityError / UniqueViolation ──
+        if any(p in error_output for p in (
+            "IntegrityError", "UniqueViolation", "UNIQUE constraint failed",
+            "duplicate key value violates", "NOT NULL constraint failed",
+        )):
+            diagnosis["error_type"] = "db_integrity_error"
+            diagnosis["root_cause"] = (
+                "Tests are sharing database state. A prior test left rows that violate "
+                "a UNIQUE or NOT NULL constraint in the next test."
+            )
+            diagnosis["fix_guidance"] = (
+                "Add to setUp():  db.drop_all(); db.create_all()\n"
+                "Add to tearDown(): db.session.remove(); db.drop_all()\n"
+                "Use 'sqlite:///:memory:' as the test DB URI.\n"
+                "For Django, use django.test.TestCase (auto-rollback per test)."
+            )
+            return diagnosis
+
+        # ── OperationalError: no such table ──
+        if any(p in error_output for p in (
+            "no such table", "relation does not exist", "Table doesn't exist",
+        )):
+            diagnosis["error_type"] = "db_table_missing"
+            diagnosis["root_cause"] = (
+                "Test database tables were never created. "
+                "db.create_all() must run inside the app context before any test."
+            )
+            diagnosis["fix_guidance"] = (
+                "In setUp(), after setting the test DB URI:\n"
+                "  with app.app_context():\n"
+                "      db.create_all()\n"
+                "For FastAPI/SQLModel: SQLModel.metadata.create_all(engine)\n"
+                "Ensure this runs BEFORE any test method that touches the DB."
+            )
+            return diagnosis
+
+        # ── Missing env var (KeyError on os.environ) ──
+        env_key_match = re.search(
+            r"KeyError: ['\"]([A-Z_]{3,})['\"]", error_output
+        )
+        if env_key_match and any(p in error_output for p in (
+            "os.environ", "os.getenv", "environ[", "getenv("
+        )):
+            missing_key = env_key_match.group(1)
+            diagnosis["error_type"] = "missing_env_var"
+            diagnosis["missing_module"] = missing_key
+            diagnosis["root_cause"] = (
+                f"Environment variable '{missing_key}' is not set in the test environment."
+            )
+            diagnosis["fix_guidance"] = (
+                f"In setUp() or conftest.py, set a safe test default:\n"
+                f"  os.environ['{missing_key}'] = 'test_value'\n"
+                f"Or use: @unittest.mock.patch.dict(os.environ, {{'{missing_key}': 'test'}})\n"
+                f"Never rely on a real .env file being present during automated tests."
+            )
+            return diagnosis
+
         return diagnosis
 
     # ── ModuleNotFoundError ──
@@ -155,7 +258,9 @@ def diagnose_test_error(error_output: str) -> dict:
             bare_file = cwd / f"{top_level}.py"
             bare_dir = cwd / top_level
 
-            if (src_file.is_file() or src_dir.is_dir()) and not bare_file.is_file() and not bare_dir.is_dir():
+            if ((src_file.is_file() or src_dir.is_dir())
+                    and not bare_file.is_file()
+                    and not bare_dir.is_dir()):
                 diagnosis["fix_guidance"] = (
                     f"The file exists at 'src/{top_level}.py' but is being "
                     f"imported as '{missing}' (without the 'src.' prefix). "
@@ -234,7 +339,8 @@ def diagnose_test_error(error_output: str) -> dict:
         from pathlib import Path
         cwd = Path.cwd()
         top_level = module.split(".")[0]
-        if (cwd / f"{top_level}.py").is_file() or (cwd / "src" / f"{top_level}.py").is_file():
+        if ((cwd / f"{top_level}.py").is_file()
+                or (cwd / "src" / f"{top_level}.py").is_file()):
             diagnosis["is_local_import"] = True
             diagnosis["fix_guidance"] += (
                 f"\n\nThis appears to be a LOCAL module. Read the file "
@@ -293,6 +399,21 @@ def diagnose_test_error(error_output: str) -> dict:
             f"2. Read the source file to see what's available\n"
             f"3. Update the version in requirements.txt if it's a "
             f"third-party package version issue"
+        )
+        return diagnosis
+
+    # ── ConnectionRefusedError (from error_line) ──
+    if "ConnectionRefusedError" in error_line or "Connection refused" in error_line:
+        diagnosis["error_type"] = "connection_refused"
+        diagnosis["root_cause"] = (
+            "Test is connecting to a real server that isn't running. "
+            "Unit/integration tests must use the framework's test client, not real HTTP."
+        )
+        diagnosis["fix_guidance"] = (
+            "Replace all requests.get/post('http://localhost:...') with:\n"
+            "  Flask: client = app.test_client(); client.get('/route')\n"
+            "  FastAPI: client = TestClient(app); client.get('/route')\n"
+            "Remove any app.run() or server.listen() calls from test files."
         )
         return diagnosis
 
@@ -742,6 +863,32 @@ def validate_changed_files(changed_files: list[str], base_dir: str | None = None
     return all_broken
 
 
+# ── Read-Only Tool Detection ──────────────────────────────────
+
+READ_ONLY_TOOLS = frozenset({
+    "read_file", "list_files", "list_tree",
+    "find_files", "search_text", "grep",
+    "file_info", "count_lines", "check_syntax",
+    "check_port", "env_info", "fetch_url",
+    "check_url", "list_deps", "git",
+})
+
+READ_ONLY_GIT = frozenset({
+    "status", "log", "diff", "branch", "tag",
+    "show", "remote", "stash list",
+})
+
+
+def _is_tool_read_only(tool_name: str, tool_args: str = "") -> bool:
+    """Check if a tool call is read-only (no side effects)."""
+    if tool_name == "git":
+        return any(
+            tool_args.strip().startswith(cmd)
+            for cmd in READ_ONLY_GIT
+        )
+    return tool_name in READ_ONLY_TOOLS
+
+
 # ── Stream Response ────────────────────────────────────────────
 
 def stream_response(messages: list[dict], config: dict) -> str:
@@ -874,32 +1021,6 @@ def stream_response(messages: list[dict], config: dict) -> str:
         tracker.end_request(config["model"], prompt_tokens)
 
     return full_response
-
-
-# ── Read-Only Tool Detection ──────────────────────────────────
-
-READ_ONLY_TOOLS = frozenset({
-    "read_file", "list_files", "list_tree",
-    "find_files", "search_text", "grep",
-    "file_info", "count_lines", "check_syntax",
-    "check_port", "env_info", "fetch_url",
-    "check_url", "list_deps", "git",
-})
-
-READ_ONLY_GIT = frozenset({
-    "status", "log", "diff", "branch", "tag",
-    "show", "remote", "stash list",
-})
-
-
-def is_tool_read_only(tool_name: str, tool_args: str = "") -> bool:
-    """Check if a tool call is read-only (no side effects)."""
-    if tool_name == "git":
-        return any(
-            tool_args.strip().startswith(cmd)
-            for cmd in READ_ONLY_GIT
-        )
-    return tool_name in READ_ONLY_TOOLS
 
 
 # ── Chat Session ──────────────────────────────────────────────
@@ -1084,8 +1205,8 @@ class ChatSession:
                     result = f"Error executing {tool_name}: {e}"
 
                 if _show_tool_output():
-                    preview = result[:500]
-                    if len(result) > 500:
+                    preview = result[:500] if result else "(empty result)"
+                    if result and len(result) > 500:
                         preview += "..."
                     console.print(f"[dim]{preview}[/dim]")
 
@@ -1093,7 +1214,7 @@ class ChatSession:
                     f"[Tool: {tool_name}] Result:\n{result}"
                 )
 
-                if is_tool_read_only(tool_name, tool_args):
+                if _is_tool_read_only(tool_name, tool_args):
                     has_read_only = True
                 else:
                     has_write = True
@@ -1216,8 +1337,6 @@ class ChatSession:
                 self._validate_written_files(tool_calls)
 
             # ── Smart error guidance injection ──
-            # Diagnose errors and give the LLM specific, actionable
-            # guidance instead of letting it guess randomly
             if _is_test_failure(result_text):
                 error_guidance = format_error_guidance(result_text)
                 result_text += error_guidance
@@ -1232,7 +1351,6 @@ class ChatSession:
                 )
 
             # Tool results go as user role (Ollama doesn't support tool role)
-            # but clearly marked as automated output
             self.messages.append({
                 "role": "user",
                 "content": (

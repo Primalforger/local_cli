@@ -84,10 +84,16 @@ def run_git(args: str, cwd: str = ".", timeout: int = 30) -> dict:
         timeout: Command timeout in seconds
 
     Returns:
-        Dict with 'success', 'stdout', 'stderr' keys
+        Dict with 'success', 'stdout', 'stderr', 'returncode' keys.
+        Always returns a dict — never None.
     """
     if not args or not args.strip():
-        return {"success": False, "stdout": "", "stderr": "Empty git command"}
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": "Empty git command",
+            "returncode": -1,
+        }
 
     try:
         result = subprocess.run(
@@ -100,8 +106,8 @@ def run_git(args: str, cwd: str = ".", timeout: int = 30) -> dict:
         )
         return {
             "success": result.returncode == 0,
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
+            "stdout": result.stdout.strip() if result.stdout else "",
+            "stderr": result.stderr.strip() if result.stderr else "",
             "returncode": result.returncode,
         }
     except subprocess.TimeoutExpired:
@@ -132,13 +138,13 @@ def run_git(args: str, cwd: str = ".", timeout: int = 30) -> dict:
 def is_git_repo(directory: str = ".") -> bool:
     """Check if directory is inside a git repository."""
     result = run_git("rev-parse --is-inside-work-tree", cwd=directory)
-    return result["success"]
+    return result["success"] and result["stdout"] == "true"
 
 
 def get_repo_root(directory: str = ".") -> Optional[str]:
     """Get the root directory of the git repository."""
     result = run_git("rev-parse --show-toplevel", cwd=directory)
-    if result["success"]:
+    if result["success"] and result["stdout"]:
         return result["stdout"]
     return None
 
@@ -179,7 +185,8 @@ def init_repo(directory: str = ".") -> bool:
         return True
 
     # Commit might fail if nothing to commit or user not configured
-    if "nothing to commit" in result["stderr"].lower():
+    stderr_lower = result.get("stderr", "").lower()
+    if "nothing to commit" in stderr_lower:
         console.print("[green]✓ Git repo initialized (empty)[/green]")
         return True
 
@@ -208,9 +215,9 @@ def _sanitize_commit_message(message: str, max_length: int = 72) -> str:
 
     - Removes/replaces dangerous characters
     - Truncates to max length
-    - Ensures single line
+    - Ensures single line and non-empty
     """
-    if not message:
+    if not message or not message.strip():
         return "Auto-commit"
 
     # Remove characters that break shell quoting
@@ -218,6 +225,8 @@ def _sanitize_commit_message(message: str, max_length: int = 72) -> str:
     sanitized = sanitized.replace('`', "'")
     sanitized = sanitized.replace('$', "")
     sanitized = sanitized.replace('\\', "/")
+    # Remove null bytes and control characters (except newline handled below)
+    sanitized = re.sub(r'[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]', '', sanitized)
 
     # Collapse to single line
     sanitized = sanitized.replace("\n", " ").replace("\r", " ")
@@ -229,7 +238,7 @@ def _sanitize_commit_message(message: str, max_length: int = 72) -> str:
     if len(sanitized) > max_length:
         sanitized = sanitized[:max_length - 3] + "..."
 
-    # Ensure non-empty
+    # Ensure non-empty after sanitization
     if not sanitized:
         sanitized = "Auto-commit"
 
@@ -253,8 +262,8 @@ def auto_commit(
 
     # Check if there are changes to commit
     status = run_git("status --porcelain", cwd=directory)
-    if not status["stdout"]:
-        return  # Nothing to commit
+    if not status["success"] or not status["stdout"]:
+        return  # Nothing to commit or status failed
 
     # Build message
     if step_id is not None:
@@ -269,6 +278,8 @@ def auto_commit(
         console.print(f"  [dim]📝 Committed: {message}[/dim]")
     elif "nothing to commit" in result.get("stderr", "").lower():
         pass  # Silently ignore — no changes to commit
+    elif "nothing added to commit" in result.get("stdout", "").lower():
+        pass  # Also silently ignore
     else:
         console.print(
             f"  [yellow]⚠ Commit failed: "
@@ -283,7 +294,7 @@ def get_current_branch(directory: str = ".") -> str:
         return result["stdout"]
     # Fallback for detached HEAD
     result = run_git("rev-parse --short HEAD", cwd=directory)
-    if result["success"]:
+    if result["success"] and result["stdout"]:
         return f"(detached: {result['stdout']})"
     return "(unknown)"
 
@@ -305,10 +316,12 @@ def create_checkpoint(directory: str, label: str) -> str:
 
     # Sanitize label for use as git tag
     label = re.sub(r'[^a-zA-Z0-9_.-]', '-', label.strip())
+    # Collapse repeated hyphens and strip leading/trailing
+    label = re.sub(r'-+', '-', label).strip('-')
     if not label:
         label = "unnamed"
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     tag = f"checkpoint-{label}-{timestamp}"
 
     result = run_git(f"tag {tag}", cwd=directory)
@@ -351,25 +364,28 @@ def display_checkpoints(directory: str = "."):
     table.add_column("Timestamp", style="dim")
 
     for i, tag in enumerate(checkpoints, 1):
-        # Parse tag: checkpoint-{label}-{timestamp}
-        parts = tag.replace("checkpoint-", "", 1)
-        # Last part is timestamp (YYYYMMDD_HHMMSS)
-        if "_" in parts:
-            # Find the timestamp at the end
-            segments = parts.rsplit("-", 1)
-            if len(segments) == 2:
-                label_part = segments[0]
-                ts_part = segments[1]
-            else:
-                label_part = parts
-                ts_part = ""
-        else:
-            label_part = parts
-            ts_part = ""
-
+        label_part, ts_part = _parse_checkpoint_tag(tag)
         table.add_row(str(i), tag, label_part, ts_part)
 
     console.print(table)
+
+
+def _parse_checkpoint_tag(tag: str) -> tuple[str, str]:
+    """Parse a checkpoint tag into (label, timestamp).
+
+    Tag format: checkpoint-{label}-{YYYYMMDD-HHMMSS}
+    """
+    # Remove the "checkpoint-" prefix
+    remainder = tag.replace("checkpoint-", "", 1) if tag.startswith("checkpoint-") else tag
+
+    # Timestamp is the last part matching YYYYMMDD-HHMMSS pattern
+    ts_match = re.search(r'(\d{8}-\d{6})$', remainder)
+    if ts_match:
+        ts_part = ts_match.group(1)
+        label_part = remainder[:ts_match.start()].rstrip("-")
+        return label_part or "(unnamed)", ts_part
+
+    return remainder, ""
 
 
 # ── Rollback Operations ───────────────────────────────────────
@@ -386,9 +402,14 @@ def rollback_to_checkpoint(directory: str, tag: str) -> bool:
 
     tag = tag.strip()
 
+    # Sanitize tag to prevent injection
+    if not re.match(r'^[a-zA-Z0-9_./-]+$', tag):
+        console.print(f"[red]Invalid tag name: {tag}[/red]")
+        return False
+
     # Verify tag exists
     verify = run_git(f"tag -l {tag}", cwd=directory)
-    if not verify["success"] or not verify["stdout"]:
+    if not verify["success"] or tag not in verify["stdout"].split("\n"):
         console.print(f"[red]Checkpoint not found: {tag}[/red]")
 
         # Suggest similar tags
@@ -434,11 +455,20 @@ def rollback_last_commit(directory: str = ".") -> bool:
 
     # Check we have at least one commit
     log_result = run_git("log --oneline -1", cwd=directory)
-    if not log_result["success"]:
+    if not log_result["success"] or not log_result["stdout"]:
         console.print("[yellow]No commits to undo.[/yellow]")
         return False
 
     commit_msg = log_result["stdout"]
+
+    # Check if this is the initial commit (can't soft reset)
+    parent_check = run_git("rev-parse --verify HEAD~1", cwd=directory)
+    if not parent_check["success"]:
+        console.print(
+            "[yellow]Cannot undo the initial commit. "
+            "Use 'git update-ref -d HEAD' for that.[/yellow]"
+        )
+        return False
 
     result = run_git("reset --soft HEAD~1", cwd=directory)
     if result["success"]:
@@ -467,17 +497,22 @@ def get_full_diff(
         directory: Repository directory
         file: Optional specific file to diff
         staged: If True, show staged changes (--cached)
+
+    Returns:
+        Diff text, or empty string if no changes
     """
     cmd = "diff"
     if staged:
         cmd += " --cached"
     if file:
-        # Sanitize file path
-        file = file.replace('"', "").replace("'", "")
-        cmd += f' -- "{file}"'
+        # Sanitize file path — remove shell-dangerous characters
+        safe_file = file.replace('"', "").replace("'", "").replace(";", "")
+        safe_file = safe_file.replace("`", "").replace("$", "")
+        if safe_file:
+            cmd += f' -- "{safe_file}"'
 
     result = run_git(cmd, cwd=directory)
-    return result["stdout"]
+    return result.get("stdout", "")
 
 
 def show_diff(directory: str = "."):
@@ -491,21 +526,33 @@ def show_diff(directory: str = "."):
 
     if staged_diff:
         console.print("\n[bold green]Staged changes:[/bold green]")
-        try:
-            console.print(
-                Syntax(staged_diff, "diff", theme="monokai")
-            )
-        except Exception:
-            console.print(staged_diff[:3000])
+        _render_diff(staged_diff)
 
     if diff:
         console.print("\n[bold yellow]Unstaged changes:[/bold yellow]")
-        try:
-            console.print(
-                Syntax(diff, "diff", theme="monokai")
-            )
-        except Exception:
-            console.print(diff[:3000])
+        _render_diff(diff)
+
+
+def _render_diff(diff_text: str, max_display: int = 5000):
+    """Render diff text with syntax highlighting, truncating if too long."""
+    display_text = diff_text
+    truncated = False
+    if len(diff_text) > max_display:
+        display_text = diff_text[:max_display]
+        truncated = True
+
+    try:
+        console.print(
+            Syntax(display_text, "diff", theme="monokai")
+        )
+    except Exception:
+        console.print(display_text)
+
+    if truncated:
+        remaining = len(diff_text) - max_display
+        console.print(
+            f"[dim]... ({remaining:,} more characters truncated)[/dim]"
+        )
 
 
 def get_changed_files(directory: str = ".") -> dict[str, str]:
@@ -520,14 +567,19 @@ def get_changed_files(directory: str = ".") -> dict[str, str]:
 
     files = {}
     for line in result["stdout"].split("\n"):
-        line = line.strip()
-        if len(line) >= 3:
-            status = line[:2].strip()
-            filepath = line[3:].strip()
-            # Handle renamed files: R100 old -> new
-            if " -> " in filepath:
-                filepath = filepath.split(" -> ")[-1]
-            files[filepath] = status
+        if not line or len(line) < 3:
+            continue
+        status = line[:2].strip()
+        filepath = line[3:].strip()
+        if not filepath:
+            continue
+        # Handle renamed files: R100 old -> new
+        if " -> " in filepath:
+            filepath = filepath.split(" -> ")[-1]
+        # Remove surrounding quotes from paths with spaces
+        if filepath.startswith('"') and filepath.endswith('"'):
+            filepath = filepath[1:-1]
+        files[filepath] = status
 
     return files
 
@@ -544,7 +596,7 @@ def get_log(directory: str = ".", count: int = 10) -> str:
         f"log --oneline --graph --decorate -n {count}",
         cwd=directory,
     )
-    return result["stdout"]
+    return result.get("stdout", "")
 
 
 def display_log(directory: str = ".", count: int = 10):
@@ -620,7 +672,8 @@ def display_status(directory: str = "."):
             changes.append(f"[red]{summary['untracked']} untracked[/red]")
         if summary["deleted"]:
             changes.append(f"[red]{summary['deleted']} deleted[/red]")
-        parts.append(" │ ".join(changes))
+        if changes:
+            parts.append(" │ ".join(changes))
 
     console.print(" │ ".join(parts))
 
@@ -633,7 +686,11 @@ def list_branches(directory: str = ".") -> list[str]:
     if result["success"] and result["stdout"]:
         branches = []
         for line in result["stdout"].split("\n"):
-            branch = line.strip().lstrip("* ").strip()
+            # Remove the "* " marker from current branch
+            branch = line.strip()
+            if branch.startswith("* "):
+                branch = branch[2:]
+            branch = branch.strip()
             if branch:
                 branches.append(branch)
         return branches
@@ -648,6 +705,13 @@ def create_branch(directory: str, name: str) -> bool:
 
     # Sanitize branch name
     name = re.sub(r'[^a-zA-Z0-9/_.-]', '-', name.strip())
+    # Git doesn't allow consecutive dots, leading/trailing hyphens or dots
+    name = re.sub(r'\.{2,}', '.', name)
+    name = name.strip('-.')
+
+    if not name:
+        console.print("[yellow]Invalid branch name after sanitization.[/yellow]")
+        return False
 
     result = run_git(f"checkout -b {name}", cwd=directory)
     if result["success"]:
@@ -666,9 +730,16 @@ def switch_branch(directory: str, name: str) -> bool:
         console.print("[yellow]Empty branch name.[/yellow]")
         return False
 
-    result = run_git(f"checkout {name.strip()}", cwd=directory)
+    name = name.strip()
+
+    # Validate branch name characters
+    if not re.match(r'^[a-zA-Z0-9/_.-]+$', name):
+        console.print(f"[red]Invalid branch name: {name}[/red]")
+        return False
+
+    result = run_git(f"checkout {name}", cwd=directory)
     if result["success"]:
-        console.print(f"[green]✓ Switched to branch: {name.strip()}[/green]")
+        console.print(f"[green]✓ Switched to branch: {name}[/green]")
         return True
 
     console.print(
@@ -691,7 +762,9 @@ def stash_changes(directory: str = ".", message: str = "") -> bool:
         console.print("[green]✓ Changes stashed[/green]")
         return True
 
-    if "no local changes" in result.get("stderr", "").lower():
+    stderr_lower = result.get("stderr", "").lower()
+    stdout_lower = result.get("stdout", "").lower()
+    if "no local changes" in stderr_lower or "no local changes" in stdout_lower:
         console.print("[dim]No changes to stash.[/dim]")
         return False
 
@@ -708,7 +781,9 @@ def stash_pop(directory: str = ".") -> bool:
         console.print("[green]✓ Stash applied and removed[/green]")
         return True
 
-    if "no stash" in result.get("stderr", "").lower():
+    stderr_lower = result.get("stderr", "").lower()
+    stdout_lower = result.get("stdout", "").lower()
+    if "no stash" in stderr_lower or "no stash" in stdout_lower:
         console.print("[dim]No stash to pop.[/dim]")
         return False
 

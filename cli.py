@@ -181,16 +181,38 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
                 plan = progress["plan"]
                 start_step = progress["next_step"]
                 resume_base_dir = progress.get("base_dir")
+                total_steps = len(plan.get("steps", []))
+                plan_name = plan.get("project_name", "unknown")
                 console.print(
-                    f"[green]Resuming from step {start_step}[/green]"
+                    f"[green]Resuming:[/green] [bold]{plan_name}[/bold] "
+                    f"— step {start_step} of {total_steps}"
                 )
                 if resume_base_dir:
                     console.print(
                         f"[dim]Project dir: {resume_base_dir}[/dim]"
                     )
+                # Guard: stale progress file points beyond the current plan
+                if start_step > total_steps:
+                    console.print(
+                        f"[red]⚠ Stale progress — step {start_step} doesn't "
+                        f"exist in this {total_steps}-step plan.[/red]"
+                    )
+                    console.print(
+                        "[dim]Delete .build_progress.json and "
+                        "re-run /improve or /build[/dim]"
+                    )
+                    return True
+                confirm = console.input(
+                    f"[bold]Resume '{plan_name}' at step "
+                    f"{start_step}/{total_steps}? (y/n): [/bold]"
+                ).strip().lower()
+                if confirm not in ("y", "yes"):
+                    console.print("[dim]Resume cancelled.[/dim]")
+                    return True
             else:
                 console.print("[red]No build progress found.[/red]")
                 return True
+
         elif arg and arg.strip() != "--resume":
             plan = load_plan(arg)
         elif hasattr(session, '_current_plan') and session._current_plan:
@@ -393,7 +415,7 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
                 console.print("[dim]No changes to commit.[/dim]")
         elif sub == "status":
             result = run_git("status --short", cwd=os.getcwd())
-            if result["stdout"]:
+            if result and result.get("stdout"):
                 console.print(result["stdout"])
             else:
                 console.print("[dim]Clean working tree.[/dim]")
@@ -707,8 +729,8 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
             pri_colors = {"high": "red", "medium": "yellow", "low": "green"}
             color = pri_colors.get(pri, "white")
             console.print(
-                f"  [{color}]{step['id']}.[/] "
-                f"{step['title']} [dim]({pri} priority)[/dim]"
+                f"  [{color}]{step.get('id', '?')}.[/] "
+                f"{step.get('title', 'Untitled')} [dim]({pri} priority)[/dim]"
             )
 
         console.print(
@@ -738,6 +760,24 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
             finally:
                 set_auto_confirm(False)
 
+            # Remove completed steps from the cached review
+            remaining = [
+                s for s in review.get("improvement_plan", [])
+                if s.get("id") not in selected
+            ]
+            if remaining:
+                session._last_review["improvement_plan"] = remaining
+                console.print(
+                    f"[dim]{len(remaining)} improvement(s) remaining. "
+                    "Use /improve to continue, or /review-project to re-scan.[/dim]"
+                )
+            else:
+                session._last_review = None
+                console.print(
+                    "[green]✓ All selected improvements applied.[/green]\n"
+                    "[dim]Run /review-project to get a fresh analysis.[/dim]"
+                )
+
     elif command == "/add-features":
         from project_reviewer import features_to_plan
         from planner import display_plan, save_plan
@@ -762,7 +802,7 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
             effort = feat.get("effort", "?")
             impact = feat.get("impact", "?")
             console.print(
-                f"  [bold]{i}.[/bold] [cyan]{feat['title']}[/cyan] "
+                f"  [bold]{i}.[/bold] [cyan]{feat.get('title', 'Untitled')}[/cyan] "
                 f"[dim](effort: {effort}, impact: {impact})[/dim]"
             )
 
@@ -879,14 +919,24 @@ def _prompt_selection(
     Returns list of selected IDs/indices, or None if cancelled.
     """
     if key:
-        valid_ids = {item[key] for item in items}
+        valid_ids = set()
+        for item in items:
+            val = item.get(key)
+            if val is not None:
+                valid_ids.add(val)
+        if not valid_ids:
+            valid_ids = set(range(1, len(items) + 1))
     else:
         valid_ids = set(range(1, (max_val or len(items)) + 1))
 
     while True:
-        selection = console.input(
-            "\n[bold]Select: [/bold]"
-        ).strip().lower()
+        try:
+            selection = console.input(
+                "\n[bold]Select: [/bold]"
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            console.print("[dim]Cancelled.[/dim]")
+            return None
 
         if not selection or selection in ("q", "quit", "cancel"):
             console.print("[dim]Cancelled.[/dim]")
@@ -896,11 +946,10 @@ def _prompt_selection(
             return sorted(valid_ids)
 
         if allow_high and selection == "high":
-            high_items = [
-                item[key] if key else i
-                for i, item in enumerate(items, 1)
-                if item.get("priority") == "high"
-            ]
+            high_items = []
+            for i, item in enumerate(items, 1):
+                if item.get("priority") == "high":
+                    high_items.append(item[key] if key else i)
             if not high_items:
                 console.print(
                     "[yellow]No high-priority items. "
@@ -1231,7 +1280,7 @@ def _show_help():
 | `/fix-fences [dir]` | Remove accidental markdown fences from files |
 
 ## Tips
-- End line with `\\` for multi-line input
+- End line with `\\\\` for multi-line input
 - Pipe: `type file.py | python cli.py "review"`
 - File arg: `python cli.py -f main.py "find bugs"`
 """))

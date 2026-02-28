@@ -24,7 +24,7 @@ class _DisplayState:
     """Encapsulated display state — avoids mutable globals scattered everywhere.
 
     All toggle states are managed here instead of in separate global variables,
-    making it thread-safe and testable.
+    making it easier to manage and test.
     """
 
     def __init__(self):
@@ -42,7 +42,7 @@ class _DisplayState:
         self.streaming = True      # Show streaming tokens (vs just final result)
 
     def apply_verbosity(self, level: Verbosity):
-        """Apply a verbosity preset."""
+        """Apply a verbosity preset — sets all toggles to match the level."""
         self.verbosity = level
 
         if level == Verbosity.QUIET:
@@ -87,6 +87,12 @@ _TOGGLE_MAP = {
     "tools": "tool_output",
     "tool_output": "tool_output",    # Alias
     "streaming": "streaming",
+}
+
+# Canonical toggle names (excludes aliases) for display purposes
+_TOGGLE_NAMES = {
+    "thinking", "previews", "diffs", "metrics",
+    "scan", "tools", "streaming",
 }
 
 # Verbosity level name mapping
@@ -147,11 +153,16 @@ def show_streaming() -> bool:
 
 # ── Public API: Setters ───────────────────────────────────────
 
-def set_verbosity(level: Union[int, str]):
-    """Set verbosity level by name or number.
+def set_verbosity(level: Union[int, str, Verbosity]):
+    """Set verbosity level by name, number, or enum.
 
-    Accepts: 'quiet'/'q'/0, 'normal'/'n'/1, 'verbose'/'v'/2
+    Accepts: 'quiet'/'q'/0, 'normal'/'n'/1, 'verbose'/'v'/2,
+             or a Verbosity enum member directly.
     """
+    if isinstance(level, Verbosity):
+        _state.apply_verbosity(level)
+        return
+
     if isinstance(level, str):
         resolved = _VERBOSITY_MAP.get(level.lower().strip())
         if resolved is None:
@@ -162,20 +173,24 @@ def set_verbosity(level: Union[int, str]):
                 "[dim]Options: quiet (0), normal (1), verbose (2)[/dim]"
             )
             return
-        level = resolved
-    elif isinstance(level, int):
+        _state.apply_verbosity(resolved)
+        return
+
+    if isinstance(level, int):
         try:
-            level = Verbosity(level)
+            resolved = Verbosity(level)
         except ValueError:
             console.print(
                 f"[yellow]Invalid verbosity level: {level}. "
                 f"Use 0 (quiet), 1 (normal), or 2 (verbose)[/yellow]"
             )
             return
-    else:
+        _state.apply_verbosity(resolved)
         return
 
-    _state.apply_verbosity(level)
+    console.print(
+        f"[yellow]Invalid verbosity type: {type(level).__name__}[/yellow]"
+    )
 
 
 def set_toggle(name: str, value: Optional[bool] = None) -> bool:
@@ -188,20 +203,23 @@ def set_toggle(name: str, value: Optional[bool] = None) -> bool:
     Returns:
         New value of the toggle, or False if toggle name is unknown.
     """
+    if not name:
+        console.print("[yellow]Toggle name cannot be empty.[/yellow]")
+        return False
+
     attr_name = _TOGGLE_MAP.get(name.lower().strip())
 
     if attr_name is None:
         console.print(f"[yellow]Unknown toggle: '{name}'[/yellow]")
         console.print(
-            f"[dim]Available: {', '.join(sorted(set(_TOGGLE_MAP.keys())))}"
-            f"[/dim]"
+            f"[dim]Available: {', '.join(sorted(_TOGGLE_NAMES))}[/dim]"
         )
         return False
 
     current = getattr(_state, attr_name)
     new_value = value if value is not None else not current
-    setattr(_state, attr_name, new_value)
-    return new_value
+    setattr(_state, attr_name, bool(new_value))
+    return bool(new_value)
 
 
 def reset_display():
@@ -251,37 +269,33 @@ def display_status():
 
 
 def display_compact_status() -> str:
-    """Return a compact one-line status string for prompts/headers."""
+    """Return a compact one-line status string for prompts/headers.
+
+    Shows only settings that differ from the defaults for the
+    current verbosity level.
+    """
     parts = []
 
     if _state.verbosity != Verbosity.NORMAL:
         parts.append(f"verbosity={_state.verbosity.name.lower()}")
 
-    # Only show non-default toggles
+    # Only show non-default toggles — compare against what the
+    # current verbosity level would set by default
     defaults = _DisplayState()
     defaults.apply_verbosity(_state.verbosity)
 
-    toggle_names = {
-        "thinking": _state.thinking,
-        "previews": _state.previews,
-        "diffs": _state.diffs,
-        "metrics": _state.metrics,
-        "scan": _state.scan_details,
-        "tools": _state.tool_output,
-        "streaming": _state.streaming,
-    }
-    default_values = {
-        "thinking": defaults.thinking,
-        "previews": defaults.previews,
-        "diffs": defaults.diffs,
-        "metrics": defaults.metrics,
-        "scan": defaults.scan_details,
-        "tools": defaults.tool_output,
-        "streaming": defaults.streaming,
-    }
+    toggle_checks = [
+        ("thinking", _state.thinking, defaults.thinking),
+        ("previews", _state.previews, defaults.previews),
+        ("diffs", _state.diffs, defaults.diffs),
+        ("metrics", _state.metrics, defaults.metrics),
+        ("scan", _state.scan_details, defaults.scan_details),
+        ("tools", _state.tool_output, defaults.tool_output),
+        ("streaming", _state.streaming, defaults.streaming),
+    ]
 
-    for name, current in toggle_names.items():
-        if current != default_values[name]:
+    for name, current, default in toggle_checks:
+        if current != default:
             state = "on" if current else "off"
             parts.append(f"{name}={state}")
 

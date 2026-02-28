@@ -15,11 +15,42 @@ from project_context import (
     scan_project, build_context_summary, build_file_map,
     display_project_scan,
 )
-from display import (
-    show_thinking, show_streaming, get_verbosity, Verbosity,
-)
 
 console = Console()
+
+
+# ── Display helpers (safe imports) ─────────────────────────────
+
+class _FallbackVerbosity:
+    """Fallback verbosity enum when display module is unavailable."""
+    QUIET = 0
+    NORMAL = 1
+    VERBOSE = 2
+
+
+def _get_verbosity():
+    """Get current verbosity level, with fallback."""
+    try:
+        from display import get_verbosity, Verbosity
+        return get_verbosity(), Verbosity
+    except (ImportError, AttributeError):
+        return _FallbackVerbosity.NORMAL, _FallbackVerbosity
+
+
+def _show_thinking() -> bool:
+    try:
+        from display import show_thinking
+        return show_thinking()
+    except (ImportError, AttributeError):
+        return True
+
+
+def _show_streaming() -> bool:
+    try:
+        from display import show_streaming
+        return show_streaming()
+    except (ImportError, AttributeError):
+        return True
 
 
 # ── System Prompts ─────────────────────────────────────────────
@@ -193,7 +224,7 @@ def _stream_and_collect(
     }
 
     full_response = ""
-    verbose = get_verbosity()
+    verbose, Verbosity = _get_verbosity()
 
     try:
         if expect_json or verbose == Verbosity.QUIET:
@@ -225,7 +256,7 @@ def _stream_and_collect(
                                 break
         else:
             # Stream text for markdown responses
-            if show_thinking():
+            if _show_thinking():
                 console.print(
                     f"\n[bold yellow]🧠 {label}...[/bold yellow]\n"
                 )
@@ -239,7 +270,7 @@ def _stream_and_collect(
                         chunk = data.get("message", {}).get("content", "")
                         if chunk:
                             full_response += chunk
-                            if show_streaming():
+                            if _show_streaming():
                                 print(chunk, end="", flush=True)
                         if data.get("done"):
                             break
@@ -304,13 +335,19 @@ def _parse_json_response(response: str, label: str = "response") -> Optional[dic
         except json.JSONDecodeError:
             pass
 
-    # Try 3: Find the outermost JSON object
+    # Try 3: Find the outermost JSON object using brace matching
+    # (re.DOTALL with greedy .* grabs the LARGEST match, which is correct
+    # for nested JSON, but can grab trailing garbage — so we try both)
     json_match = re.search(r'\{.*\}', response, re.DOTALL)
     if json_match:
+        candidate = json_match.group()
         try:
-            return json.loads(json_match.group())
+            return json.loads(candidate)
         except json.JSONDecodeError:
-            pass
+            # Try to find balanced braces manually
+            parsed = _extract_balanced_json(response)
+            if parsed is not None:
+                return parsed
 
     console.print(
         f"[red]Could not parse {label} JSON from model response.[/red]"
@@ -319,6 +356,48 @@ def _parse_json_response(response: str, label: str = "response") -> Optional[dic
         "[dim]Tip: Try a larger model or run again. "
         "Smaller models sometimes produce invalid JSON.[/dim]"
     )
+    return None
+
+
+def _extract_balanced_json(text: str) -> Optional[dict]:
+    """Extract JSON by finding balanced braces — more reliable than regex."""
+    start = text.find('{')
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start, len(text)):
+        char = text[i]
+
+        if escape:
+            escape = False
+            continue
+
+        if char == '\\' and in_string:
+            escape = True
+            continue
+
+        if char == '"' and not escape:
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+
     return None
 
 
@@ -661,7 +740,9 @@ _EFFORT_COLORS = {
 
 def _color_tag(value: str, color_map: dict) -> str:
     """Wrap a value in a Rich color tag based on a color map."""
-    color = color_map.get(value, "white")
+    if not value or not isinstance(value, str):
+        return str(value) if value else "?"
+    color = color_map.get(value.lower(), "white")
     return f"[{color}]{value.upper()}[/]"
 
 
@@ -671,7 +752,7 @@ def display_review(review: dict):
         console.print("[yellow]Empty review.[/yellow]")
         return
 
-    verbose = get_verbosity()
+    verbose, Verbosity = _get_verbosity()
 
     # ── Summary panel (always shown) ──────────────────────────
     arch_quality = review.get("architecture_quality", "?")
@@ -737,12 +818,12 @@ def display_review(review: dict):
             sev = issue.get("severity", "medium")
             row = [
                 _color_tag(sev, _SEVERITY_COLORS),
-                issue.get("category", ""),
-                issue.get("file", ""),
-                issue.get("description", ""),
+                str(issue.get("category", "")),
+                str(issue.get("file", "")),
+                str(issue.get("description", "")),
             ]
             if verbose == Verbosity.VERBOSE:
-                row.append(issue.get("suggestion", ""))
+                row.append(str(issue.get("suggestion", "")))
             table.add_row(*row)
 
         console.print(table)
@@ -775,7 +856,7 @@ def display_review(review: dict):
             ]
             if verbose == Verbosity.VERBOSE:
                 row.append(
-                    feat.get("estimated_complexity", "?")
+                    str(feat.get("estimated_complexity", "?"))
                 )
                 row.append(
                     str(feat.get("estimated_files", "?"))
@@ -880,7 +961,7 @@ def display_suggestions(suggestions: dict):
         console.print("[yellow]No suggestions.[/yellow]")
         return
 
-    verbose = get_verbosity()
+    verbose, Verbosity = _get_verbosity()
     features = suggestions.get("suggested_features", [])
     quick_wins = suggestions.get("quick_wins", [])
 
@@ -953,7 +1034,6 @@ def display_suggestions(suggestions: dict):
             title = qw.get("title", "?")
             desc = qw.get("description", "")
             file_ref = qw.get("file", "")
-            effort = qw.get("effort", "trivial")
 
             file_part = f" [dim]({file_ref})[/dim]" if file_ref else ""
             console.print(
