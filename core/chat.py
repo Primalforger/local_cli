@@ -846,6 +846,7 @@ class ChatSession:
         last_tool_calls = ""
         repeated_count = 0
         response = ""
+        iteration = 0
 
         for iteration in range(self.max_tool_iterations):
             console.print("\n[bold blue]Assistant:[/bold blue]")
