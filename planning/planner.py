@@ -22,6 +22,15 @@ from core.config import PLANS_DIR
 from core.display import show_streaming, show_thinking, get_verbosity, Verbosity
 from llm.llm_backend import OllamaBackend
 
+try:
+    from planning.templates import (
+        TEMPLATES, FEATURE_PATTERNS, get_template_prompt,
+    )
+except ImportError:
+    TEMPLATES = {}
+    FEATURE_PATTERNS = {}
+    get_template_prompt = None
+
 console = Console()
 
 
@@ -331,6 +340,172 @@ def _validate_plan(plan: dict) -> tuple[bool, list[str]]:
     return is_valid, issues
 
 
+# ── Template & Pattern Matching ───────────────────────────────
+
+def _suggest_template(
+    description: str,
+) -> tuple[str | None, dict | None]:
+    """Score each template against the description and return best match.
+
+    Scoring: direct name match (+10), category match (+3),
+    tech word overlap (+2 each), description word overlap (+1 each).
+    Minimum score of 4 to avoid false positives.
+
+    Returns (template_name, template_info) or (None, None).
+    """
+    if not TEMPLATES or not description:
+        return None, None
+
+    desc_lower = description.lower()
+    desc_words = set(re.findall(r'[a-z]+', desc_lower))
+
+    best_name: str | None = None
+    best_info: dict | None = None
+    best_score = 0
+
+    for name, info in TEMPLATES.items():
+        score = 0
+
+        # Direct name match (e.g., "fastapi" in description)
+        if name.lower() in desc_lower:
+            score += 10
+
+        # Category match (e.g., "backend", "frontend")
+        category = info.get("category", "")
+        if category and category.lower() in desc_lower:
+            score += 3
+
+        # Tech word overlap
+        tech_str = info.get("tech", "")
+        tech_words = set(
+            w.strip().lower()
+            for w in tech_str.replace(",", " ").split()
+            if len(w.strip()) > 2
+        )
+        tech_overlap = desc_words & tech_words
+        score += len(tech_overlap) * 2
+
+        # Description word overlap
+        tmpl_desc = info.get("description", "")
+        tmpl_words = set(re.findall(r'[a-z]+', tmpl_desc.lower()))
+        # Filter common stop words
+        stop = {"a", "an", "the", "with", "and", "or", "for", "of", "in"}
+        meaningful = (desc_words - stop) & (tmpl_words - stop)
+        score += len(meaningful)
+
+        if score > best_score:
+            best_score = score
+            best_name = name
+            best_info = info
+
+    if best_score >= 4:
+        return best_name, best_info
+    return None, None
+
+
+# Keyword → pattern name mapping for natural language detection
+_PATTERN_KEYWORDS: dict[str, list[str]] = {
+    "auth-middleware": [
+        "authentication", "auth", "login", "jwt", "oauth",
+        "signup", "sign-up",
+    ],
+    "pagination": [
+        "pagination", "paginate", "paging", "paginated",
+    ],
+    "docker": [
+        "docker", "container", "containerize", "dockerfile",
+    ],
+    "ci-cd": [
+        "ci/cd", "ci-cd", "pipeline", "github actions",
+        "continuous integration",
+    ],
+    "websocket": [
+        "websocket", "real-time", "realtime", "ws://",
+        "live updates",
+    ],
+    "caching": [
+        "caching", "cache", "redis", "memcached",
+    ],
+    "rate-limiting": [
+        "rate limit", "rate-limit", "throttle", "throttling",
+    ],
+    "file-upload": [
+        "file upload", "upload", "multipart", "file storage",
+    ],
+    "background-jobs": [
+        "background job", "task queue", "celery", "worker",
+        "async task", "cron",
+    ],
+    "email": [
+        "email", "smtp", "mail", "sendgrid", "ses",
+    ],
+    "search": [
+        "search", "full-text search", "elasticsearch", "fts",
+    ],
+    "logging": [
+        "logging", "structured logging", "log aggregation",
+    ],
+    "testing": [
+        "test suite", "integration tests", "e2e tests",
+        "test coverage",
+    ],
+    "db-migration": [
+        "migration", "alembic", "schema migration",
+        "database migration",
+    ],
+    "api-docs": [
+        "api documentation", "swagger", "openapi", "api docs",
+    ],
+    "rest-endpoint": [
+        "rest api", "crud", "endpoints", "rest endpoint",
+    ],
+    "error-tracking": [
+        "error tracking", "sentry", "monitoring",
+        "error reporting",
+    ],
+}
+
+
+def _detect_feature_patterns(
+    description: str, tech_stack: list[str] | None = None,
+) -> list[tuple[str, dict]]:
+    """Detect feature patterns mentioned in a description.
+
+    Maps natural language keywords to FEATURE_PATTERNS entries.
+    Optionally filters by tech_stack compatibility.
+
+    Returns list of (pattern_name, pattern_info) matches.
+    """
+    if not FEATURE_PATTERNS or not description:
+        return []
+
+    desc_lower = description.lower()
+    matched: list[tuple[str, dict]] = []
+
+    for pattern_name, keywords in _PATTERN_KEYWORDS.items():
+        if pattern_name not in FEATURE_PATTERNS:
+            continue
+        for kw in keywords:
+            if kw in desc_lower:
+                info = FEATURE_PATTERNS[pattern_name]
+                # Filter by tech compatibility if specified
+                if tech_stack:
+                    applicable = info.get("applicable_to", [])
+                    if applicable:
+                        tech_lower = [
+                            t.lower() for t in tech_stack
+                        ]
+                        if not any(
+                            a.lower() in " ".join(tech_lower)
+                            for a in applicable
+                        ):
+                            break
+                matched.append((pattern_name, info))
+                break  # One match per pattern is enough
+
+    return matched
+
+
 # ── Plan Generation ────────────────────────────────────────────
 
 def generate_plan(
@@ -349,11 +524,52 @@ def generate_plan(
         console.print("[yellow]Please describe what to build.[/yellow]")
         return None
 
-    user_prompt = f"Create a detailed project plan for: {description.strip()}"
+    # ── Template-aware prompt ─────────────────────────
+    template_name, template_info = _suggest_template(description)
+    if template_name and get_template_prompt:
+        console.print(
+            f"[cyan]Matched template: {template_name}[/cyan]"
+        )
+        template_prompt = get_template_prompt(
+            template_name, description.strip()
+        )
+        if template_prompt:
+            user_prompt = (
+                f"Create a detailed project plan for: "
+                f"{template_prompt}"
+            )
+        else:
+            user_prompt = (
+                f"Create a detailed project plan for: "
+                f"{description.strip()}"
+            )
+    else:
+        user_prompt = (
+            f"Create a detailed project plan for: "
+            f"{description.strip()}"
+        )
+
+    # ── Pattern-aware system prompt ───────────────────
+    system_prompt = PLAN_SYSTEM_PROMPT
+    detected = _detect_feature_patterns(description)
+    if detected:
+        pattern_hints = (
+            "\n\nInclude these features as dedicated "
+            "plan steps:\n"
+        )
+        for name, info in detected:
+            pattern_hints += (
+                f"- {name}: {info['description']}\n"
+            )
+        system_prompt = PLAN_SYSTEM_PROMPT + pattern_hints
+        console.print(
+            f"[dim]Detected patterns: "
+            f"{', '.join(n for n, _ in detected)}[/dim]"
+        )
 
     full_response = _stream_plan_response(
         config,
-        PLAN_SYSTEM_PROMPT,
+        system_prompt,
         user_prompt,
         label="Planning project",
     )
