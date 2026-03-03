@@ -69,6 +69,23 @@ Rules:
 - All directory paths should end with /
 - Use consistent naming conventions throughout"""
 
+REFINE_SYSTEM_PROMPT = """You are a senior software architect refining an existing project plan.
+
+Current plan (JSON):
+{current_plan_json}
+
+The user wants to modify this plan. Apply MINIMAL changes to satisfy the request.
+
+Rules:
+- Respond with ONLY the complete updated JSON plan — no text before or after
+- Preserve existing step IDs where possible — only add/remove/renumber if structurally required
+- Keep all fields that haven't changed
+- If adding steps, insert them in dependency order and update depends_on fields
+- If removing steps, update other steps' depends_on to remove references
+- Do NOT regenerate the entire plan from scratch — make targeted edits
+- Keep the same project_name unless explicitly asked to rename
+- Maintain the same JSON structure as the current plan"""
+
 STEP_SYSTEM_PROMPT = """You are a senior developer implementing one step of a project plan.
 
 Context:
@@ -288,6 +305,28 @@ def _validate_plan(plan: dict) -> tuple[bool, list[str]]:
     if not isinstance(plan.get("directory_structure"), list):
         plan["directory_structure"] = []
 
+    # Ensure optional validation config has defaults
+    if "validation" in plan:
+        val = plan["validation"]
+        if not isinstance(val, dict):
+            plan["validation"] = {}
+        else:
+            val.setdefault("skip_stages", [])
+            val.setdefault("custom_stages", [])
+            # Validate skip_stages is a list of strings
+            if not isinstance(val.get("skip_stages"), list):
+                val["skip_stages"] = []
+            # Validate custom_stages is a list of dicts
+            if not isinstance(val.get("custom_stages"), list):
+                val["custom_stages"] = []
+            for cs in val.get("custom_stages", []):
+                if isinstance(cs, dict):
+                    if "name" not in cs or "command" not in cs:
+                        issues.append(
+                            "Custom validation stage missing "
+                            "'name' or 'command' field"
+                        )
+
     is_valid = len(issues) == 0
     return is_valid, issues
 
@@ -345,6 +384,68 @@ def generate_plan(
             )
 
     return plan
+
+
+def refine_plan(
+    current_plan: dict,
+    instruction: str,
+    config: dict,
+) -> Optional[dict]:
+    """Refine an existing plan based on user instructions.
+
+    Instead of regenerating from scratch, sends the current plan
+    and the refinement instruction to the LLM for targeted edits.
+
+    Args:
+        current_plan: The existing plan dict to refine
+        instruction: What to change (e.g., "add user auth")
+        config: CLI configuration
+
+    Returns:
+        Updated plan dict, or None on failure
+    """
+    if not instruction or not instruction.strip():
+        console.print(
+            "[yellow]Please describe what to change.[/yellow]"
+        )
+        return None
+
+    plan_json = json.dumps(current_plan, indent=2)
+    system = REFINE_SYSTEM_PROMPT.format(
+        current_plan_json=plan_json,
+    )
+    user_prompt = (
+        f"Refine the plan: {instruction.strip()}\n\n"
+        f"Respond with the COMPLETE updated JSON plan."
+    )
+
+    full_response = _stream_plan_response(
+        config,
+        system,
+        user_prompt,
+        label="Refining plan",
+        temperature=0.3,
+    )
+
+    if not full_response:
+        return None
+
+    refined = _parse_plan_json(full_response)
+    if not refined:
+        return None
+
+    # Validate the refined plan
+    is_valid, issues = _validate_plan(refined)
+    if issues:
+        if is_valid:
+            for issue in issues:
+                console.print(f"  [yellow]⚠ {issue}[/yellow]")
+        else:
+            console.print("[red]Refined plan has issues:[/red]")
+            for issue in issues:
+                console.print(f"  [red]• {issue}[/red]")
+
+    return refined
 
 
 # ── Plan Display ───────────────────────────────────────────────

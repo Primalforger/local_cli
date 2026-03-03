@@ -1051,6 +1051,123 @@ def build_context_summary(
     return "\n".join(sections)
 
 
+def build_focused_context(
+    ctx: ProjectContext,
+    target_files: list[str],
+    created_files: dict[str, str] | None = None,
+    max_chars: int = 10000,
+) -> str:
+    """Build a focused context summary for a specific build step.
+
+    Instead of dumping the entire project summary, includes only:
+    - The step's target files (files_to_create)
+    - Files from dependency steps (already created)
+    - Direct imports of target files (via dependency_graph)
+    - Config files (json, toml, yaml, cfg, txt for requirements)
+
+    Args:
+        ctx: Full project context from scan_project
+        target_files: Files this step will create/modify
+        created_files: Files already created by prior steps
+        max_chars: Maximum character budget for the summary
+    """
+    if created_files is None:
+        created_files = {}
+
+    relevant: set[str] = set()
+
+    # 1. Target files themselves (if they already exist)
+    for f in target_files:
+        if f in ctx.files:
+            relevant.add(f)
+
+    # 2. Files that target files import (direct deps from graph)
+    for f in target_files:
+        for dep in ctx.dependency_graph.get(f, []):
+            relevant.add(dep)
+
+    # 3. Files from created_files that target files might depend on
+    for f in target_files:
+        # Check what the target file's imports resolve to
+        info = ctx.files.get(f)
+        if info:
+            for imp in info.imports:
+                resolved = resolve_import(imp, f, ctx)
+                if resolved:
+                    relevant.add(resolved)
+
+    # 4. Any created file that imports a target file (reverse deps)
+    for fpath in created_files:
+        if fpath in ctx.dependency_graph:
+            for dep in ctx.dependency_graph[fpath]:
+                if dep in target_files or dep in relevant:
+                    relevant.add(fpath)
+                    break
+
+    # 5. Config files are always relevant
+    config_exts = (".json", ".toml", ".yaml", ".yml", ".cfg")
+    config_names = ("requirements.txt", "package.json", "Cargo.toml", "go.mod")
+    for fpath in ctx.files:
+        fname = fpath.split("/")[-1]
+        if fname in config_names or fpath.endswith(config_exts):
+            relevant.add(fpath)
+
+    # Build the summary from relevant files only
+    sections = ["## Focused Project Context"]
+    sections.append(f"Target files: {', '.join(target_files)}")
+    sections.append(f"Relevant files: {len(relevant)}")
+
+    # Issues for relevant files only
+    relevant_issues = [
+        i for i in ctx.issues
+        if i.get("file") in relevant or i.get("file") in target_files
+    ]
+    if relevant_issues:
+        sections.append("\n## Relevant Issues")
+        for issue in relevant_issues:
+            icon = "❌" if issue.get("severity") == "error" else "⚠️"
+            sections.append(
+                f"  {icon} [{issue['type']}] {issue['message']}"
+            )
+
+    sections.append("\n## File Contents")
+    remaining = max_chars - len("\n".join(sections))
+
+    # Prioritize: target files first, then deps, then config
+    def _sort_key(fpath: str) -> tuple[int, int]:
+        if fpath in target_files:
+            return (0, ctx.files[fpath].size if fpath in ctx.files else 0)
+        if fpath.endswith(config_exts) or fpath.split("/")[-1] in config_names:
+            return (1, ctx.files[fpath].size if fpath in ctx.files else 0)
+        return (2, ctx.files[fpath].size if fpath in ctx.files else 0)
+
+    for fpath in sorted(relevant, key=_sort_key):
+        info = ctx.files.get(fpath)
+        if not info:
+            # File in created_files but not in ctx (newly created)
+            content = created_files.get(fpath, "")
+            if not content:
+                continue
+        else:
+            content = info.content
+
+        block = f"\n--- {fpath} ---\n{content}\n"
+        if len(block) < remaining:
+            sections.append(block)
+            remaining -= len(block)
+        elif remaining > 300:
+            truncated = content[: remaining - 200]
+            sections.append(
+                f"\n--- {fpath} (truncated) ---\n"
+                f"{truncated}\n... (truncated)"
+            )
+            break
+        else:
+            break
+
+    return "\n".join(sections)
+
+
 def build_file_map(ctx: ProjectContext) -> dict[str, str]:
     return {
         fpath: info.content for fpath, info in ctx.files.items()

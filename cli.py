@@ -155,12 +155,31 @@ def cmd_save(ctx: CommandContext):
 
 @command("/plan", description="Generate project plan", category="Planning")
 def cmd_plan(ctx: CommandContext):
-    from planning.planner import generate_plan, display_plan, save_plan
+    from planning.planner import generate_plan, refine_plan, display_plan, save_plan
 
     if not ctx.arg:
         ctx.console.print(
             "[yellow]Usage: /plan <description of what to build>[/yellow]"
         )
+        return
+
+    # If a plan already exists, auto-route to refinement
+    if ctx.session._current_plan:
+        ctx.console.print(
+            "[dim]Existing plan detected — refining "
+            "instead of regenerating.[/dim]"
+        )
+        refined = refine_plan(
+            ctx.session._current_plan, ctx.arg, ctx.config
+        )
+        if refined:
+            display_plan(refined)
+            ctx.session._current_plan = refined
+            ctx.console.print(
+                "[green]Plan refined! Use /build to execute.[/green]"
+            )
+        else:
+            ctx.console.print("[red]Could not refine plan.[/red]")
         return
 
     plan = generate_plan(ctx.arg, ctx.config)
@@ -296,6 +315,63 @@ def cmd_template(ctx: CommandContext):
         ctx.console.print(f"[red]Unknown template: {template_name}[/red]")
 
 
+@command("/pattern", description="Apply feature pattern to project", category="Planning")
+def cmd_pattern(ctx: CommandContext):
+    from planning.templates import (
+        apply_feature_pattern, display_feature_patterns,
+        FEATURE_PATTERNS,
+    )
+    from planning.planner import generate_plan, display_plan, save_plan
+
+    if not ctx.arg:
+        display_feature_patterns()
+        return
+
+    parts = ctx.arg.split(maxsplit=1)
+    pattern_name = parts[0].lower()
+    resource = parts[1] if len(parts) > 1 else ""
+
+    # Detect current project tech stack
+    project_tech = []
+    try:
+        from planning.project_context import scan_project
+        ctx_project = scan_project(Path.cwd(), auto_detect=False)
+        # Infer from file extensions
+        for fpath in ctx_project.files:
+            if fpath.endswith(".py"):
+                project_tech.append("python")
+                break
+        for fpath in ctx_project.files:
+            if fpath.endswith((".js", ".ts")):
+                project_tech.append("node")
+                break
+    except Exception:
+        pass
+
+    prompt = apply_feature_pattern(
+        pattern_name, resource=resource,
+        project_tech=project_tech,
+    )
+    if not prompt:
+        return
+
+    ctx.console.print(
+        f"[green]Applying pattern: {pattern_name}"
+        f"{f' ({resource})' if resource else ''}[/green]"
+    )
+
+    plan = generate_plan(prompt, ctx.config)
+    if plan:
+        display_plan(plan)
+        ctx.console.print()
+        save_it = ctx.console.input(
+            "[bold]Save this plan? (y/n): [/bold]"
+        ).strip().lower()
+        if save_it in ("y", "yes"):
+            save_plan(plan)
+        ctx.session._current_plan = plan
+
+
 @command("/review", description="AI reviews current plan", category="Planning")
 def cmd_review(ctx: CommandContext):
     if not ctx.session._current_plan:
@@ -312,7 +388,7 @@ def cmd_review(ctx: CommandContext):
 
 @command("/revise", description="Update plan", category="Planning")
 def cmd_revise(ctx: CommandContext):
-    from planning.planner import PLAN_SYSTEM_PROMPT, display_plan
+    from planning.planner import refine_plan, display_plan
 
     if not ctx.session._current_plan:
         ctx.console.print("[yellow]No plan loaded. Use /plan first.[/yellow]")
@@ -321,59 +397,17 @@ def cmd_revise(ctx: CommandContext):
         ctx.console.print("[yellow]Usage: /revise <what to change>[/yellow]")
         return
 
-    plan = ctx.session._current_plan
-    revise_prompt = (
-        f"Current plan:\n"
-        f"```json\n{json.dumps(plan, indent=2)}\n```\n\n"
-        f"Revise based on: {ctx.arg}\n\n"
-        f"Respond with the COMPLETE updated JSON plan."
+    refined = refine_plan(
+        ctx.session._current_plan, ctx.arg, ctx.config
     )
-
-    url = f"{ctx.config['ollama_url']}/api/chat"
-    payload = {
-        "model": ctx.config["model"],
-        "messages": [
-            {"role": "system", "content": PLAN_SYSTEM_PROMPT},
-            {"role": "user", "content": revise_prompt},
-        ],
-        "stream": True,
-        "options": {
-            "temperature": 0.3,
-            "num_ctx": ctx.config.get("num_ctx", 32768),
-        },
-    }
-
-    ctx.console.print("\n[bold yellow]Revising plan...[/bold yellow]\n")
-    full_response = ""
-    try:
-        with httpx.stream(
-            "POST", url, json=payload, timeout=120.0
-        ) as resp:
-            for line in resp.iter_lines():
-                if line:
-                    data = json.loads(line)
-                    chunk = data.get("message", {}).get("content", "")
-                    if chunk:
-                        full_response += chunk
-                        print(chunk, end="", flush=True)
-                    if data.get("done"):
-                        break
-    except Exception as e:
-        ctx.console.print(f"\n[red]Error: {e}[/red]")
-        return
-
-    print()
-    try:
-        json_match = re.search(r"\{.*\}", full_response, re.DOTALL)
-        if json_match:
-            revised = json.loads(json_match.group())
-            ctx.session._current_plan = revised
-            display_plan(revised)
-            ctx.console.print(
-                "[green]Plan revised! Use /build to execute.[/green]"
-            )
-    except Exception:
-        ctx.console.print("[red]Could not parse revised plan.[/red]")
+    if refined:
+        ctx.session._current_plan = refined
+        display_plan(refined)
+        ctx.console.print(
+            "[green]Plan refined! Use /build to execute.[/green]"
+        )
+    else:
+        ctx.console.print("[red]Could not refine plan.[/red]")
 
 
 # ── Git ────────────────────────────────────────────────────────
@@ -783,6 +817,14 @@ def cmd_review_focus(ctx: CommandContext):
 
 @command("/improve", description="Build improvements from last review", category="Review")
 def cmd_improve(ctx: CommandContext):
+    """Apply improvements from review. Supports --severity and --category filters.
+
+    Usage:
+        /improve                          — show all improvements
+        /improve --severity high          — only high-priority items
+        /improve --category security      — only security-related items
+        /improve --severity high --category performance
+    """
     from planning.project_reviewer import review_to_plan
     from planning.planner import display_plan, save_plan
     from planning.builder import build_plan as run_build
@@ -800,22 +842,58 @@ def cmd_improve(ctx: CommandContext):
         ctx.console.print("[yellow]No improvement steps in the review.[/yellow]")
         return
 
+    # Parse --severity and --category filters from ctx.arg
+    severity_filter = None
+    category_filter = None
+    if ctx.arg:
+        parts = ctx.arg.split()
+        for i, part in enumerate(parts):
+            if part == "--severity" and i + 1 < len(parts):
+                severity_filter = parts[i + 1].lower()
+            elif part == "--category" and i + 1 < len(parts):
+                category_filter = parts[i + 1].lower()
+
+    # Apply filters
+    filtered_steps = _filter_improvement_steps(
+        steps, severity_filter, category_filter
+    )
+
+    if severity_filter or category_filter:
+        filters_desc = []
+        if severity_filter:
+            filters_desc.append(f"severity={severity_filter}")
+        if category_filter:
+            filters_desc.append(f"category={category_filter}")
+        ctx.console.print(
+            f"[dim]Filtered by: {', '.join(filters_desc)} "
+            f"({len(filtered_steps)}/{len(steps)} items)[/dim]"
+        )
+
+    if not filtered_steps:
+        ctx.console.print(
+            "[yellow]No improvements match the filter.[/yellow]"
+        )
+        return
+
     ctx.console.print("\n[bold]Select improvements to apply:[/bold]\n")
 
-    for step in steps:
+    for step in filtered_steps:
         pri = step.get("priority", "medium")
         pri_colors = {"high": "red", "medium": "yellow", "low": "green"}
         color = pri_colors.get(pri, "white")
+        cat = step.get("category", "")
+        cat_str = f" [{cat}]" if cat else ""
         ctx.console.print(
             f"  [{color}]{step.get('id', '?')}.[/] "
-            f"{step.get('title', 'Untitled')} [dim]({pri} priority)[/dim]"
+            f"{step.get('title', 'Untitled')} "
+            f"[dim]({pri} priority{cat_str})[/dim]"
         )
 
     ctx.console.print(
         "\n[dim]Enter: numbers (1,2,3) | 'all' | 'high' | 'q' to cancel[/dim]"
     )
 
-    selected = _prompt_selection(steps, key="id", allow_high=True)
+    selected = _prompt_selection(filtered_steps, key="id", allow_high=True)
     if selected is None:
         return
 
@@ -1024,6 +1102,37 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
 
 
 # ── Helper: Selection Prompt ───────────────────────────────────
+
+def _filter_improvement_steps(
+    steps: list[dict],
+    severity: str | None = None,
+    category: str | None = None,
+) -> list[dict]:
+    """Filter improvement steps by severity and/or category.
+
+    Args:
+        steps: List of improvement step dicts from review
+        severity: Filter to this priority level (high/medium/low)
+        category: Filter to this category (security, performance, etc.)
+
+    Returns:
+        Filtered list of steps matching all provided criteria.
+    """
+    result = steps
+    if severity:
+        result = [
+            s for s in result
+            if s.get("priority", "medium").lower() == severity
+        ]
+    if category:
+        result = [
+            s for s in result
+            if category in s.get("category", "").lower()
+            or category in s.get("title", "").lower()
+            or category in s.get("description", "").lower()
+        ]
+    return result
+
 
 def _prompt_selection(
     items: list,

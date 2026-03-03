@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 import shutil
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +18,8 @@ from rich.syntax import Syntax
 
 from planning.planner import STEP_SYSTEM_PROMPT
 from planning.project_context import (
-    scan_project, build_context_summary, build_file_map
+    scan_project, build_context_summary, build_file_map,
+    build_focused_context,
 )
 from utils.git_integration import (
     auto_commit, create_checkpoint, init_repo, is_git_repo,
@@ -90,6 +93,298 @@ def _show_streaming() -> bool:
         return show_streaming()
     except (ImportError, AttributeError):
         return True
+
+
+# ── Data Classes ───────────────────────────────────────────────
+
+@dataclass
+class FixAttempt:
+    """Record of a single fix attempt for history tracking."""
+    attempt: int
+    error_summary: str
+    files_modified: list[str]
+    approach: str
+    result: str  # "success", "partial", "no_change"
+
+
+@dataclass
+class StepMetrics:
+    """Token and timing metrics for a single build step."""
+    step_id: int
+    step_title: str
+    generation_tokens: int = 0
+    fix_tokens: int = 0
+    fix_attempts: int = 0
+    duration_seconds: float = 0.0
+    _start_time: float = field(default=0.0, repr=False)
+
+    def start(self):
+        self._start_time = time.time()
+
+    def stop(self):
+        if self._start_time > 0:
+            self.duration_seconds = time.time() - self._start_time
+
+
+class BuildMetrics:
+    """Aggregate metrics across all build steps."""
+
+    def __init__(self):
+        self.steps: list[StepMetrics] = []
+        self._current: StepMetrics | None = None
+        self._build_start: float = time.time()
+
+    def start_step(self, step_id: int, step_title: str) -> StepMetrics:
+        metrics = StepMetrics(step_id=step_id, step_title=step_title)
+        metrics.start()
+        self._current = metrics
+        self.steps.append(metrics)
+        return metrics
+
+    def record_generation(self, token_count: int):
+        if self._current:
+            self._current.generation_tokens += token_count
+
+    def record_fix(self, token_count: int):
+        if self._current:
+            self._current.fix_tokens += token_count
+            self._current.fix_attempts += 1
+
+    def end_step(self):
+        if self._current:
+            self._current.stop()
+            self._current = None
+
+    def display_summary(self):
+        """Display a Rich table summarizing token usage per step."""
+        from rich.table import Table
+
+        if not self.steps:
+            return
+
+        table = Table(
+            title="\n📊 Build Metrics Summary",
+            show_lines=True,
+            border_style="dim",
+        )
+        table.add_column("#", style="bold", width=4, justify="right")
+        table.add_column("Step", style="cyan", min_width=20)
+        table.add_column("Gen Tokens", justify="right", width=12)
+        table.add_column("Fix Tokens", justify="right", width=12)
+        table.add_column("Fix Attempts", justify="right", width=12)
+        table.add_column("Duration", justify="right", width=10)
+
+        total_gen = 0
+        total_fix = 0
+        total_attempts = 0
+        total_duration = 0.0
+
+        for m in self.steps:
+            duration_str = f"{m.duration_seconds:.1f}s"
+            table.add_row(
+                str(m.step_id),
+                m.step_title,
+                str(m.generation_tokens),
+                str(m.fix_tokens),
+                str(m.fix_attempts),
+                duration_str,
+            )
+            total_gen += m.generation_tokens
+            total_fix += m.fix_tokens
+            total_attempts += m.fix_attempts
+            total_duration += m.duration_seconds
+
+        table.add_row(
+            "",
+            "[bold]Total[/bold]",
+            f"[bold]{total_gen}[/bold]",
+            f"[bold]{total_fix}[/bold]",
+            f"[bold]{total_attempts}[/bold]",
+            f"[bold]{total_duration:.1f}s[/bold]",
+        )
+
+        console.print(table)
+        elapsed = time.time() - self._build_start
+        console.print(
+            f"[dim]Total build time: {elapsed:.1f}s │ "
+            f"Total tokens: {total_gen + total_fix}[/dim]"
+        )
+
+
+@dataclass
+class FileSnapshot:
+    """Snapshot of file contents for rollback on failed fixes."""
+    _snapshots: dict[str, str | None] = field(default_factory=dict)
+    _base_dir: Path = field(default_factory=Path)
+
+    def snapshot_files(self, paths: list[str], base_dir: Path):
+        """Save current content of files. None = file didn't exist."""
+        self._base_dir = base_dir
+        self._snapshots.clear()
+        for p in paths:
+            full = base_dir / p
+            if full.exists():
+                try:
+                    self._snapshots[p] = full.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    self._snapshots[p] = None
+            else:
+                self._snapshots[p] = None
+
+    def rollback(self):
+        """Restore files to their snapshotted state."""
+        rolled_back = []
+        for p, content in self._snapshots.items():
+            full = self._base_dir / p
+            if content is None:
+                # File didn't exist before — delete it if created
+                if full.exists():
+                    try:
+                        full.unlink()
+                        rolled_back.append(f"deleted {p}")
+                    except OSError:
+                        pass
+            else:
+                try:
+                    full.write_text(content, encoding="utf-8")
+                    rolled_back.append(f"restored {p}")
+                except OSError:
+                    pass
+        if rolled_back:
+            console.print(
+                f"  [yellow]↩ Rolled back: "
+                f"{', '.join(rolled_back[:5])}"
+                f"{'...' if len(rolled_back) > 5 else ''}[/yellow]"
+            )
+
+    def get_modified_files(self) -> list[str]:
+        """Return files whose current content differs from snapshot."""
+        modified = []
+        for p, old_content in self._snapshots.items():
+            full = self._base_dir / p
+            if old_content is None:
+                if full.exists():
+                    modified.append(p)
+            elif full.exists():
+                try:
+                    current = full.read_text(encoding="utf-8")
+                    if current != old_content:
+                        modified.append(p)
+                except (UnicodeDecodeError, OSError):
+                    pass
+            else:
+                modified.append(p)
+        return modified
+
+
+class BuildDashboard:
+    """Live-updating build progress dashboard using Rich.
+
+    Shows a table with step status, fix counts, and token usage.
+    Only used when streaming is OFF (Live conflicts with streaming).
+    Falls back to linear output otherwise.
+    """
+
+    def __init__(self, steps: list[dict], metrics: BuildMetrics):
+        self._steps = steps
+        self._metrics = metrics
+        self._status: dict[int, str] = {}
+        self._live = None
+        self._enabled = False
+
+        for step in steps:
+            self._status[step.get("id", 0)] = "pending"
+
+    def start(self):
+        """Start live dashboard if streaming is off."""
+        if _show_streaming():
+            return  # Live conflicts with token streaming
+        try:
+            from rich.live import Live
+            self._live = Live(
+                self._build_table(),
+                console=console,
+                refresh_per_second=2,
+            )
+            self._live.__enter__()
+            self._enabled = True
+        except Exception:
+            self._enabled = False
+
+    def stop(self):
+        """Stop live dashboard."""
+        if self._live and self._enabled:
+            try:
+                self._live.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._live = None
+            self._enabled = False
+
+    def update_step(self, step_id: int, status: str):
+        """Update a step's status and refresh the display.
+
+        status: pending, generating, validating, passed, failed, skipped
+        """
+        self._status[step_id] = status
+        if self._live and self._enabled:
+            try:
+                self._live.update(self._build_table())
+            except Exception:
+                pass
+
+    def _build_table(self):
+        """Build the Rich table for the dashboard."""
+        from rich.table import Table
+
+        table = Table(
+            title="🚀 Build Progress",
+            border_style="dim",
+            show_lines=False,
+        )
+        table.add_column("#", style="bold", width=4, justify="right")
+        table.add_column("Step", min_width=20)
+        table.add_column("Status", width=12)
+        table.add_column("Fixes", justify="right", width=6)
+        table.add_column("Tokens", justify="right", width=8)
+
+        status_styles = {
+            "pending": "[dim]pending[/dim]",
+            "generating": "[bold yellow]generating[/bold yellow]",
+            "validating": "[bold cyan]validating[/bold cyan]",
+            "passed": "[bold green]✓ passed[/bold green]",
+            "failed": "[bold red]✗ failed[/bold red]",
+            "skipped": "[dim]skipped[/dim]",
+        }
+
+        for step in self._steps:
+            sid = step.get("id", 0)
+            status = self._status.get(sid, "pending")
+            status_display = status_styles.get(
+                status, f"[dim]{status}[/dim]"
+            )
+
+            # Find metrics for this step
+            step_m = None
+            for m in self._metrics.steps:
+                if m.step_id == sid:
+                    step_m = m
+                    break
+
+            fixes = str(step_m.fix_attempts) if step_m else "—"
+            tokens = str(
+                step_m.generation_tokens + step_m.fix_tokens
+            ) if step_m else "—"
+
+            table.add_row(
+                str(sid),
+                step.get("title", ""),
+                status_display,
+                fixes,
+                tokens,
+            )
+
+        return table
 
 
 # ── Prompts ────────────────────────────────────────────────────
@@ -795,8 +1090,12 @@ def _stream_llm_response(
     temperature: float = 0.2,
     max_tokens: int = 8192,
     status_label: str = "Generating",
-) -> str:
-    """Stream an LLM response via OllamaBackend."""
+) -> tuple[str, int]:
+    """Stream an LLM response via OllamaBackend.
+
+    Returns:
+        Tuple of (response_text, approximate_token_count).
+    """
     backend = OllamaBackend.from_config(config)
     backend._streaming_timeout = 180.0  # Builder needs longer timeout
     messages = [
@@ -809,6 +1108,7 @@ def _stream_llm_response(
 
     if _show_streaming():
         def on_chunk(chunk: str) -> None:
+            _token_count[0] += 1
             print(chunk, end="", flush=True)
     else:
         _status_ctx[0] = console.status(
@@ -841,7 +1141,7 @@ def _stream_llm_response(
     if _show_streaming():
         print()
 
-    return full_response
+    return full_response, _token_count[0]
 
 
 # ── File Parsing ───────────────────────────────────────────────
@@ -1296,6 +1596,7 @@ def auto_fix(
     created_files: dict[str, str],
     config: dict,
     attempt: int = 0,
+    fix_history: list[FixAttempt] | None = None,
 ) -> bool:
     """Ask model to fix errors using diff-based edits with smart diagnosis."""
     project_summary = "(Error scanning project)"
@@ -1552,6 +1853,21 @@ def auto_fix(
             "reinstalled automatically after you fix this."
         )
 
+    # Inject fix history so the LLM knows what was already tried
+    if fix_history and attempt > 0:
+        history_block = "\n\nPREVIOUS FIX ATTEMPTS (do NOT repeat these approaches):\n"
+        for prev in fix_history:
+            history_block += (
+                f"  Attempt {prev.attempt}: {prev.approach}\n"
+                f"    Files modified: {', '.join(prev.files_modified) or 'none'}\n"
+                f"    Result: {prev.result}\n"
+                f"    Error after fix: {prev.error_summary[:200]}\n\n"
+            )
+        history_block += (
+            "You MUST try a DIFFERENT approach than the ones listed above.\n"
+        )
+        system += history_block
+
     if attempt >= 3:
         system += (
             "\n\nIMPORTANT: Previous edit attempts FAILED. "
@@ -1580,7 +1896,7 @@ def auto_fix(
                 f"in the source file. Do NOT touch requirements.txt."
             )
 
-    full_response = _stream_llm_response(
+    full_response, fix_token_count = _stream_llm_response(
         config,
         system,
         user_msg,
@@ -1684,15 +2000,27 @@ def run_validation_pipeline(
     base_dir, plan, project_info, created_files, config,
     step_label="",
 ) -> bool:
+    # Read optional validation config from plan
+    validation_config = plan.get("validation", {})
+    skip_stages = set(
+        s.lower() for s in validation_config.get("skip_stages", [])
+    )
+    custom_stages = validation_config.get("custom_stages", [])
+
     stages = []
-    stages.append(("Cross-Reference Check", "xref", None))
-    stages.append(("Syntax Check", "syntax_check", None))
+
+    if "xref" not in skip_stages and "cross-reference check" not in skip_stages:
+        stages.append(("Cross-Reference Check", "xref", None))
+    if "syntax" not in skip_stages and "syntax check" not in skip_stages:
+        stages.append(("Syntax Check", "syntax_check", None))
 
     dep_files = (
         "requirements.txt", "package.json",
         "Cargo.toml", "go.mod",
     )
-    if any((base_dir / f).exists() for f in dep_files):
+    if "install" not in skip_stages and any(
+        (base_dir / f).exists() for f in dep_files
+    ):
         install_cmds = project_info.get("install_cmd")
         if install_cmds:
             if isinstance(install_cmds, str):
@@ -1702,25 +2030,33 @@ def run_validation_pipeline(
                 label = labels[i] if i < len(labels) else f"Install Step {i+1}"
                 stages.append((label, "command", cmd))
 
-    if project_info.get("build_cmd"):
+    if "build" not in skip_stages and project_info.get("build_cmd"):
         stages.append((
             "Build", "command", project_info["build_cmd"]
         ))
 
-    if project_info.get("lint_cmd") and project_info.get(
+    if "lint" not in skip_stages and project_info.get("lint_cmd") and project_info.get(
         "type"
     ) in ("rust", "go"):
         stages.append((
             "Lint", "command", project_info["lint_cmd"]
         ))
 
-    test_dirs = (
-        "tests", "test", "src/tests", "spec", "__tests__",
-    )
-    if any((base_dir / d).exists() for d in test_dirs):
-        if project_info.get("test_cmd"):
+    if "test" not in skip_stages and "tests" not in skip_stages:
+        test_dirs = (
+            "tests", "test", "src/tests", "spec", "__tests__",
+        )
+        if any((base_dir / d).exists() for d in test_dirs):
+            if project_info.get("test_cmd"):
+                stages.append((
+                    "Tests", "command", project_info["test_cmd"]
+                ))
+
+    # Append custom validation stages from plan
+    for cs in custom_stages:
+        if isinstance(cs, dict) and "name" in cs and "command" in cs:
             stages.append((
-                "Tests", "command", project_info["test_cmd"]
+                cs["name"], "command", cs["command"]
             ))
 
     if not stages:
@@ -1748,22 +2084,26 @@ def run_validation_pipeline(
         passed = False
         _seen_error_hashes: set[str] = set()
         _last_error_hash: str = ""
+        stage_fix_history: list[FixAttempt] = []
         for attempt in range(MAX_FIX_ATTEMPTS):
             if stage_type == "xref":
                 passed = _validate_xref(
                     base_dir, plan, created_files,
                     config, stage_name, attempt,
+                    fix_history=stage_fix_history,
                 )
             elif stage_type == "syntax_check":
                 passed = _validate_syntax(
                     base_dir, plan, created_files,
                     config, stage_name, attempt,
+                    fix_history=stage_fix_history,
                 )
             elif stage_type == "command":
                 passed = _validate_command(
                     stage_cmd, base_dir, plan,
                     created_files, config,
                     stage_name, attempt,
+                    fix_history=stage_fix_history,
                 )
 
             if passed:
@@ -1798,6 +2138,7 @@ def run_validation_pipeline(
 def _validate_xref(
     base_dir, plan, created_files, config,
     stage_name, attempt,
+    fix_history: list[FixAttempt] | None = None,
 ) -> bool:
     try:
         ctx = scan_project(base_dir, auto_detect=False)
@@ -1856,6 +2197,7 @@ def _validate_xref(
         auto_fix(
             error_info, base_dir, plan, created_files,
             config, attempt=attempt,
+            fix_history=fix_history,
         )
 
     return False
@@ -1864,6 +2206,7 @@ def _validate_xref(
 def _validate_syntax(
     base_dir, plan, created_files, config,
     stage_name, attempt,
+    fix_history: list[FixAttempt] | None = None,
 ) -> bool:
     try:
         ctx = scan_project(base_dir, auto_detect=False)
@@ -1911,6 +2254,7 @@ def _validate_syntax(
         auto_fix(
             error_info, base_dir, plan, created_files,
             config, attempt=attempt,
+            fix_history=fix_history,
         )
 
     return False
@@ -1919,6 +2263,7 @@ def _validate_syntax(
 def _validate_command(
     stage_cmd, base_dir, plan, created_files, config,
     stage_name, attempt,
+    fix_history: list[FixAttempt] | None = None,
 ) -> bool:
     """Run a command-based validation stage with smart error diagnosis."""
     result = run_cmd(stage_cmd, cwd=str(base_dir))
@@ -2024,11 +2369,35 @@ def _validate_command(
             )
         except Exception:
             pass
+
+        # Snapshot files before fix for potential rollback
+        snapshot = FileSnapshot()
+        all_project_files = list(created_files.keys())
+        snapshot.snapshot_files(all_project_files[:50], base_dir)
+
         fixed = auto_fix(
             result, base_dir, plan, created_files,
             config, attempt=attempt,
+            fix_history=fix_history,
         )
+
+        # Record this fix attempt in history
+        if fix_history is not None:
+            modified = snapshot.get_modified_files()
+            error_summary = (
+                result.get("stderr", "") or result.get("stdout", "")
+            )[:300]
+            fix_history.append(FixAttempt(
+                attempt=attempt + 1,
+                error_summary=error_summary,
+                files_modified=modified,
+                approach=f"auto_fix attempt {attempt + 1}",
+                result="applied" if fixed else "no_change",
+            ))
+
         if not fixed:
+            # Rollback failed fix if nothing was written
+            snapshot.rollback()
             console.print(
                 "[red]No fixes generated.[/red]"
             )
@@ -2038,12 +2407,197 @@ def _validate_command(
     return False
 
 
+# ── Pre-Step Validation ────────────────────────────────────────
+
+def pre_step_validation(
+    base_dir: Path,
+    plan: dict,
+    created_files: dict[str, str],
+    config: dict,
+) -> bool:
+    """Validate project state before starting the next step.
+
+    Checks for syntax errors and broken imports left by
+    previous steps. If issues are found, attempts auto_fix
+    before proceeding.
+
+    Returns:
+        True if project is in a healthy state (or was healed).
+    """
+    try:
+        ctx = scan_project(base_dir, auto_detect=False)
+    except Exception as e:
+        console.print(
+            f"  [yellow]⚠ Pre-step scan error: {e}[/yellow]"
+        )
+        return True  # Don't block on scan failure
+
+    # Check for syntax errors
+    syntax_errors = []
+    for fpath, info in ctx.files.items():
+        if hasattr(info, "errors") and info.errors:
+            syntax_errors.extend(
+                (fpath, err) for err in info.errors
+            )
+
+    # Check for severity=error import issues
+    import_errors = [
+        i for i in ctx.issues
+        if i.get("severity") == "error"
+        and i.get("type") == "missing_import"
+    ]
+
+    if not syntax_errors and not import_errors:
+        return True
+
+    issue_count = len(syntax_errors) + len(import_errors)
+    console.print(
+        f"\n[yellow]⚠ Pre-step check: "
+        f"{issue_count} issue(s) from prior steps[/yellow]"
+    )
+    for fpath, err in syntax_errors[:5]:
+        console.print(f"  [red]• {fpath}: {err}[/red]")
+    for err in import_errors[:5]:
+        console.print(
+            f"  [red]• {err.get('message', '')}[/red]"
+        )
+
+    # Attempt auto-fix
+    console.print(
+        "[yellow]🔧 Attempting to heal before "
+        "next step...[/yellow]"
+    )
+    error_msgs = []
+    error_msgs.extend(
+        f"Syntax: {f}: {e}" for f, e in syntax_errors
+    )
+    error_msgs.extend(
+        e.get("message", "") for e in import_errors
+    )
+    error_info = {
+        "command": "pre-step validation",
+        "returncode": 1,
+        "stdout": "",
+        "stderr": "\n".join(error_msgs),
+    }
+    created_files.update(build_file_map(ctx))
+    fixed = auto_fix(
+        error_info, base_dir, plan, created_files,
+        config, attempt=0,
+    )
+
+    if fixed:
+        # Re-check after fix
+        try:
+            ctx2 = scan_project(base_dir, auto_detect=False)
+            remaining_errors = [
+                i for i in ctx2.issues
+                if i.get("severity") == "error"
+            ]
+            remaining_syntax = sum(
+                1 for info in ctx2.files.values()
+                if hasattr(info, "errors") and info.errors
+            )
+            if not remaining_errors and not remaining_syntax:
+                console.print(
+                    "  [green]✓ Pre-step issues "
+                    "resolved[/green]"
+                )
+                return True
+        except Exception:
+            pass
+
+    console.print(
+        "  [yellow]⚠ Some pre-step issues remain — "
+        "proceeding anyway[/yellow]"
+    )
+    return True  # Don't block the build
+
+
+# ── File Completeness Checking ────────────────────────────────
+
+_STUB_PATTERNS = [
+    r'^\s*pass\s*$',
+    r'^\s*\.\.\.\s*$',
+    r'^\s*#\s*TODO',
+    r'^\s*raise\s+NotImplementedError',
+    r'^\s*todo!\(\)',
+    r'^\s*unimplemented!\(\)',
+]
+
+def check_file_completeness(
+    step: dict,
+    created_files: dict[str, str],
+    base_dir: Path,
+) -> list[dict]:
+    """Check that generated files are complete, not stubs.
+
+    Flags files that:
+    - Are listed in files_to_create but don't exist
+    - Are empty
+    - Contain 3+ stub patterns (pass, ..., TODO, NotImplementedError)
+
+    Returns list of warning dicts with 'file', 'issue', 'severity'.
+    """
+    import re as _re
+
+    warnings: list[dict] = []
+    files_to_create = step.get("files_to_create", [])
+
+    for fpath in files_to_create:
+        full = base_dir / fpath
+
+        # Check existence
+        if not full.exists():
+            if fpath not in created_files:
+                warnings.append({
+                    "file": fpath,
+                    "issue": "File listed in step but not created",
+                    "severity": "error",
+                })
+            continue
+
+        # Check emptiness
+        try:
+            content = full.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+
+        if not content.strip():
+            warnings.append({
+                "file": fpath,
+                "issue": "File is empty",
+                "severity": "error",
+            })
+            continue
+
+        # Check stub patterns
+        stub_count = 0
+        for line in content.split("\n"):
+            for pattern in _STUB_PATTERNS:
+                if _re.match(pattern, line):
+                    stub_count += 1
+                    break
+
+        if stub_count >= 3:
+            warnings.append({
+                "file": fpath,
+                "issue": (
+                    f"File appears to be a stub "
+                    f"({stub_count} stub patterns found)"
+                ),
+                "severity": "warning",
+            })
+
+    return warnings
+
+
 # ── Code Generation ────────────────────────────────────────────
 
 def generate_step_code(
     plan, step, created_files, config,
     base_dir=None,
-) -> str:
+) -> tuple[str, int]:
     project_summary = "(No files created yet)"
     existing_file_list = []
 
@@ -2066,11 +2620,26 @@ def generate_step_code(
                         f"{issue.get('message', '')}"
                         f"[/dim]"
                     )
-            project_summary = build_context_summary(
-                ctx, max_chars=10000
-            )
             created_files.update(build_file_map(ctx))
             existing_file_list = list(ctx.files.keys())
+
+            # Gather target files: this step's files + files from depends_on steps
+            target_files = list(step.get("files_to_create", []))
+            dep_step_ids = step.get("depends_on", [])
+            if dep_step_ids:
+                all_steps = plan.get("steps", [])
+                for dep_id in dep_step_ids:
+                    for s in all_steps:
+                        if s.get("id") == dep_id:
+                            target_files.extend(s.get("files_to_create", []))
+
+            # Use focused context instead of full project summary
+            project_summary = build_focused_context(
+                ctx,
+                target_files=target_files,
+                created_files=created_files,
+                max_chars=10000,
+            )
         except Exception as e:
             console.print(
                 f"[yellow]⚠ Error scanning: {e}[/yellow]"
@@ -2140,6 +2709,263 @@ def generate_step_code(
             f"{step.get('title', '')}"
         ),
     )
+
+
+# ── TDD Generation Mode ───────────────────────────────────────
+
+TDD_TEST_SYSTEM_PROMPT = """You are a senior developer writing tests FIRST (test-driven development).
+
+Context:
+- Project: {project_name}
+- Description: {description}
+- Tech stack: {tech_stack}
+- Step {step_id}/{total_steps}: {step_title}
+- Step description: {step_description}
+- Files that WILL be created (not yet existing): {files_to_create}
+
+Previously created files:
+{previous_files}
+
+Instructions:
+- Write ONLY test files for this step
+- Import from the modules that WILL be created (they don't exist yet)
+- Tests should cover the expected behavior described in the step
+- Use proper test structure (unittest or pytest)
+- Each test should be specific and test one behavior
+- Include edge cases and error cases
+- Do NOT write the implementation — only the tests
+
+Use this format:
+<file path="tests/test_something.py">
+complete test file content
+</file>
+
+CRITICAL: Only generate test files. The implementation will be generated separately."""
+
+
+def generate_step_code_tdd(
+    plan: dict,
+    step: dict,
+    created_files: dict[str, str],
+    config: dict,
+    base_dir: Path | None = None,
+) -> tuple[str, int]:
+    """Generate code for a step using TDD: tests first, then implementation.
+
+    Phase 1: Generate test files only
+    Phase 2: Generate implementation with tests in context
+
+    Returns:
+        Tuple of (combined_response, total_token_count)
+    """
+    project_summary = "(No files created yet)"
+    if base_dir and base_dir.exists():
+        try:
+            ctx = scan_project(base_dir, auto_detect=False)
+            project_summary = build_context_summary(
+                ctx, max_chars=8000
+            )
+            created_files.update(build_file_map(ctx))
+        except Exception:
+            pass
+
+    # Phase 1: Generate tests
+    console.print(
+        f"\n[bold magenta]🧪 TDD Phase 1: "
+        f"Generating tests...[/bold magenta]\n"
+    )
+
+    test_system = TDD_TEST_SYSTEM_PROMPT.format(
+        project_name=plan.get("project_name", "unknown"),
+        description=plan.get("description", ""),
+        tech_stack=", ".join(plan.get("tech_stack", [])),
+        step_id=step.get("id", 0),
+        total_steps=len(plan.get("steps", [])),
+        step_title=step.get("title", ""),
+        step_description=step.get("description", ""),
+        files_to_create=", ".join(step.get("files_to_create", [])),
+        previous_files=project_summary,
+    )
+
+    test_response, test_tokens = _stream_llm_response(
+        config,
+        test_system,
+        f"Write tests for step {step.get('id', '?')}: "
+        f"{step.get('title', '')}",
+        temperature=0.2,
+        max_tokens=4096,
+        status_label="Generating tests",
+    )
+
+    if not test_response:
+        return "", 0
+
+    # Write test files to disk
+    process_response_files(
+        test_response, base_dir, created_files,
+        config=config, plan=plan,
+    )
+
+    # Refresh files after writing tests
+    if base_dir:
+        created_files = _load_existing_files(base_dir)
+
+    # Phase 2: Generate implementation with tests in context
+    console.print(
+        f"\n[bold magenta]🔧 TDD Phase 2: "
+        f"Generating implementation "
+        f"(tests in context)...[/bold magenta]\n"
+    )
+
+    impl_response, impl_tokens = generate_step_code(
+        plan, step, created_files, config, base_dir
+    )
+
+    total_tokens = test_tokens + impl_tokens
+    return impl_response, total_tokens
+
+
+# ── Parallel Step Execution ──────────────────────────────────
+
+def compute_execution_waves(
+    steps: list[dict],
+) -> list[list[dict]]:
+    """Compute parallel execution waves via topological sort.
+
+    Groups steps into waves where all steps within a wave
+    can execute in parallel (no inter-wave dependencies).
+
+    Args:
+        steps: List of step dicts with 'id' and 'depends_on' fields
+
+    Returns:
+        List of waves, each wave is a list of step dicts.
+    """
+    step_map = {s.get("id"): s for s in steps}
+    in_degree: dict[int, int] = {}
+    dependents: dict[int, list[int]] = {}
+
+    for s in steps:
+        sid = s.get("id", 0)
+        deps = s.get("depends_on", [])
+        in_degree[sid] = len(deps)
+        for d in deps:
+            dependents.setdefault(d, []).append(sid)
+
+    waves: list[list[dict]] = []
+    remaining = set(in_degree.keys())
+
+    while remaining:
+        # Find all steps with no unresolved dependencies
+        wave_ids = [
+            sid for sid in remaining
+            if in_degree.get(sid, 0) == 0
+        ]
+
+        if not wave_ids:
+            # Circular dependency — break by taking remaining
+            wave_ids = list(remaining)
+
+        wave = [step_map[sid] for sid in sorted(wave_ids) if sid in step_map]
+        waves.append(wave)
+
+        for sid in wave_ids:
+            remaining.discard(sid)
+            for dep_id in dependents.get(sid, []):
+                in_degree[dep_id] = max(0, in_degree.get(dep_id, 1) - 1)
+
+    return waves
+
+
+def build_plan_parallel(
+    plan: dict,
+    wave: list[dict],
+    created_files: dict[str, str],
+    config: dict,
+    base_dir: Path,
+    build_metrics: BuildMetrics,
+) -> dict[str, str]:
+    """Execute a wave of independent steps in parallel.
+
+    Each step gets its own copy of created_files for reading.
+    File writes are serialized to avoid conflicts.
+
+    Args:
+        plan: The build plan
+        wave: List of steps to execute in parallel
+        created_files: Current project files
+        config: CLI configuration
+        base_dir: Project directory
+        build_metrics: Metrics tracker
+
+    Returns:
+        Updated created_files dict after all steps complete.
+
+    Note: Ollama single-model on GPU may bottleneck;
+    benefit mainly on multi-GPU/CPU setups.
+    """
+    import concurrent.futures
+    import threading
+
+    write_lock = threading.Lock()
+    results: dict[int, tuple[str, int]] = {}
+
+    def _execute_step(step: dict) -> tuple[int, str, int]:
+        step_id = step.get("id", 0)
+        # Each thread gets a read-only copy
+        files_copy = dict(created_files)
+        response, tokens = generate_step_code(
+            plan, step, files_copy, config, base_dir
+        )
+        return step_id, response, tokens
+
+    console.print(
+        f"\n[bold cyan]⚡ Parallel wave: "
+        f"{len(wave)} steps[/bold cyan]"
+    )
+    for s in wave:
+        console.print(
+            f"  [dim]• Step {s.get('id')}: "
+            f"{s.get('title', '')}[/dim]"
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(wave), 4)
+    ) as executor:
+        futures = {
+            executor.submit(_execute_step, step): step
+            for step in wave
+        }
+
+        for future in concurrent.futures.as_completed(futures):
+            step = futures[future]
+            step_id = step.get("id", 0)
+            try:
+                sid, response, tokens = future.result()
+                results[sid] = (response, tokens)
+                build_metrics.record_generation(tokens)
+                console.print(
+                    f"  [green]✓ Step {sid} generated "
+                    f"({tokens} tokens)[/green]"
+                )
+            except Exception as e:
+                console.print(
+                    f"  [red]✗ Step {step_id} failed: "
+                    f"{e}[/red]"
+                )
+
+    # Apply results sequentially (ordered by step ID)
+    for step_id in sorted(results.keys()):
+        response, tokens = results[step_id]
+        if response:
+            with write_lock:
+                process_response_files(
+                    response, base_dir, created_files,
+                    config=config, plan=plan,
+                )
+
+    # Refresh from disk
+    return _load_existing_files(base_dir)
 
 
 # ── Progress ───────────────────────────────────────────────────
@@ -2386,25 +3212,35 @@ def build_plan(
     console.print(
         "  [dim]3) No auto-test (manual)[/dim]"
     )
+    console.print(
+        "  [dim]4) TDD mode "
+        "(generate tests first, then implement)[/dim]"
+    )
+    console.print(
+        "  [dim]5) Parallel steps "
+        "(independent steps run concurrently)[/dim]"
+    )
 
     try:
         if is_resuming:
             build_mode = console.input(
-                "[bold]Choose (1/2/3) [default=2]: [/bold]"
+                "[bold]Choose (1-5) [default=2]: [/bold]"
             ).strip()
         else:
             build_mode = console.input(
-                "[bold]Choose (1/2/3): [/bold]"
+                "[bold]Choose (1-5): [/bold]"
             ).strip()
     except (KeyboardInterrupt, EOFError):
         console.print("[yellow]Build cancelled.[/yellow]")
         return
 
-    if build_mode not in ("1", "2", "3"):
+    if build_mode not in ("1", "2", "3", "4", "5"):
         build_mode = "2"
 
-    validate_every_step = build_mode == "1"
-    validate_at_end = build_mode in ("1", "2")
+    validate_every_step = build_mode in ("1", "4")
+    validate_at_end = build_mode in ("1", "2", "4")
+    tdd_mode = build_mode == "4"
+    parallel_mode = build_mode == "5"
 
     # Only ask confirmation for fresh builds
     if not is_resuming:
@@ -2488,6 +3324,67 @@ def build_plan(
                         )
 
     # ── Step loop ──────────────────────────────────────
+    build_metrics = BuildMetrics()
+    dashboard = BuildDashboard(remaining_steps, build_metrics)
+
+    # Parallel mode: execute independent steps concurrently
+    if parallel_mode:
+        waves = compute_execution_waves(remaining_steps)
+        console.print(
+            f"\n[bold cyan]⚡ Parallel mode: "
+            f"{len(waves)} wave(s)[/bold cyan]"
+        )
+        for wave_idx, wave in enumerate(waves, 1):
+            console.print(
+                f"\n{'=' * 60}\n"
+                f"[bold]Wave {wave_idx}/{len(waves)} — "
+                f"{len(wave)} step(s)[/bold]"
+            )
+            for ws in wave:
+                dashboard.update_step(
+                    ws.get("id", 0), "generating"
+                )
+
+            created_files = build_plan_parallel(
+                plan, wave, created_files, config,
+                base_dir, build_metrics,
+            )
+
+            for ws in wave:
+                dashboard.update_step(
+                    ws.get("id", 0), "passed"
+                )
+                try:
+                    auto_commit(
+                        str(base_dir),
+                        ws.get("title", f"Step {ws.get('id')}"),
+                        step_id=ws.get("id", 0),
+                    )
+                except Exception:
+                    pass
+
+        # Skip to final validation after parallel execution
+        if validate_at_end:
+            console.print(f"\n{'=' * 60}")
+            console.print("[bold]🧪 Final Validation[/bold]")
+            project_info = detect_project_type(
+                base_dir, plan
+            )
+            run_validation_pipeline(
+                base_dir, plan, project_info,
+                created_files, config,
+                step_label="Final",
+            )
+
+        build_metrics.display_summary()
+        console.print(Panel.fit(
+            f"[bold green]🎉 MVP Complete![/bold green]\n\n"
+            f"Project: [cyan]{base_dir}[/cyan]\n"
+            f"Files: {len(created_files)}",
+            border_style="green",
+        ))
+        return
+
     for step in steps:
         step_id = step.get("id", 0)
         if step_id < start_step:
@@ -2540,19 +3437,40 @@ def build_plan(
                 "[yellow]Build paused. "
                 "Resume with /build --resume[/yellow]"
             )
+            build_metrics.display_summary()
             return
         elif action in ("s", "skip"):
+            dashboard.update_step(step_id, "skipped")
             console.print("[dim]Skipped.[/dim]")
             continue
 
-        response = generate_step_code(
-            plan, step, created_files, config, base_dir
+        step_metrics = build_metrics.start_step(
+            step_id, step.get("title", f"Step {step_id}")
         )
 
+        # Pre-step validation (skip for step 1)
+        if step_id > 1:
+            pre_step_validation(
+                base_dir, plan, created_files, config
+            )
+
+        dashboard.update_step(step_id, "generating")
+        if tdd_mode:
+            response, gen_tokens = generate_step_code_tdd(
+                plan, step, created_files, config, base_dir
+            )
+        else:
+            response, gen_tokens = generate_step_code(
+                plan, step, created_files, config, base_dir
+            )
+        build_metrics.record_generation(gen_tokens)
+
         if not response:
+            dashboard.update_step(step_id, "failed")
             console.print(
                 "[red]Generation failed.[/red]"
             )
+            build_metrics.end_step()
             continue
 
         wrote_any = process_response_files(
@@ -2572,10 +3490,11 @@ def build_plan(
             except (KeyboardInterrupt, EOFError):
                 retry = "n"
             if retry in ("y", "yes"):
-                response = generate_step_code(
+                response, retry_tokens = generate_step_code(
                     plan, step, created_files,
                     config, base_dir,
                 )
+                build_metrics.record_generation(retry_tokens)
                 if response:
                     process_response_files(
                         response, base_dir,
@@ -2585,6 +3504,19 @@ def build_plan(
 
         # Refresh from disk
         created_files = _load_existing_files(base_dir)
+
+        # Check file completeness (stub detection)
+        completeness_issues = check_file_completeness(
+            step, created_files, base_dir
+        )
+        if completeness_issues:
+            for ci in completeness_issues:
+                sev = ci.get("severity", "warning")
+                color = "red" if sev == "error" else "yellow"
+                console.print(
+                    f"  [{color}]⚠ {ci['file']}: "
+                    f"{ci['issue']}[/{color}]"
+                )
 
         try:
             auto_commit(
@@ -2608,6 +3540,7 @@ def build_plan(
         )
 
         if validate_every_step:
+            dashboard.update_step(step_id, "validating")
             project_info = detect_project_type(
                 base_dir, plan
             )
@@ -2637,6 +3570,8 @@ def build_plan(
                         f"failed: {e}[/yellow]"
                     )
             else:
+                dashboard.update_step(step_id, "failed")
+                build_metrics.end_step()
                 save_progress(
                     plan, step_id, base_dir
                 )
@@ -2645,8 +3580,11 @@ def build_plan(
                     "manually and "
                     "/build --resume[/yellow]"
                 )
+                build_metrics.display_summary()
                 return
 
+        dashboard.update_step(step_id, "passed")
+        build_metrics.end_step()
         save_progress(plan, step_id + 1, base_dir)
         console.print(
             f"\n[green]✅ Step {step_id} "
@@ -2696,6 +3634,9 @@ def build_plan(
         set_auto_confirm(False)
     except ImportError:
         pass
+
+    # ── Display build metrics ─────────────────────────
+    build_metrics.display_summary()
 
     console.print(Panel.fit(
         f"[bold green]🎉 MVP Complete![/bold green]\n\n"

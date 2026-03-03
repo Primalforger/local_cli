@@ -709,3 +709,196 @@ def create_custom_template(
     except OSError as e:
         console.print(f"[red]Error saving template: {e}[/red]")
         return False
+
+
+# ── Feature Pattern Templates ─────────────────────────────────
+
+FEATURE_PATTERNS: dict[str, dict] = {
+    "rest-endpoint": {
+        "description": "Add a REST API endpoint with CRUD operations",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node"],
+        "prompt_template": (
+            "Add a complete REST API endpoint for '{resource}' to the existing project. "
+            "Include: model/schema definition, CRUD route handlers (GET list, GET by ID, "
+            "POST create, PUT update, DELETE), input validation, error handling, "
+            "and corresponding test file. Follow the project's existing patterns."
+        ),
+        "typical_files": [
+            "src/models/{resource}.py",
+            "src/routes/{resource}.py",
+            "tests/test_{resource}.py",
+        ],
+    },
+    "auth-middleware": {
+        "description": "Add authentication middleware (JWT or session-based)",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node"],
+        "prompt_template": (
+            "Add authentication middleware to the existing project. "
+            "Include: user model with password hashing, login/register endpoints, "
+            "JWT token generation and validation middleware, protected route decorator, "
+            "and auth tests. Follow the project's existing patterns."
+        ),
+        "typical_files": [
+            "src/auth.py",
+            "src/middleware/auth.py",
+            "tests/test_auth.py",
+        ],
+    },
+    "db-migration": {
+        "description": "Add database migration support",
+        "applicable_to": ["python", "fastapi", "flask", "django"],
+        "prompt_template": (
+            "Add database migration support to the existing project. "
+            "Include: migration configuration, initial migration script, "
+            "migration commands (upgrade, downgrade, generate), and migration tests. "
+            "Use Alembic for SQLAlchemy projects, built-in migrations for Django."
+        ),
+        "typical_files": [
+            "migrations/env.py",
+            "migrations/versions/001_initial.py",
+            "alembic.ini",
+        ],
+    },
+    "websocket": {
+        "description": "Add WebSocket real-time communication",
+        "applicable_to": ["python", "fastapi", "flask", "express", "node"],
+        "prompt_template": (
+            "Add WebSocket support for real-time '{feature}' to the existing project. "
+            "Include: WebSocket endpoint handler, connection manager, event broadcasting, "
+            "client-side connection setup, reconnection logic, and WebSocket tests."
+        ),
+        "typical_files": [
+            "src/websocket.py",
+            "src/ws_manager.py",
+            "tests/test_websocket.py",
+        ],
+    },
+    "caching": {
+        "description": "Add caching layer (Redis or in-memory)",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node"],
+        "prompt_template": (
+            "Add a caching layer to the existing project. "
+            "Include: cache configuration, cache decorator for functions/routes, "
+            "cache invalidation on writes, TTL support, and cache tests. "
+            "Use Redis if available, fall back to in-memory caching."
+        ),
+        "typical_files": [
+            "src/cache.py",
+            "src/config/cache.py",
+            "tests/test_cache.py",
+        ],
+    },
+    "logging": {
+        "description": "Add structured logging with rotation",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node", "rust", "go"],
+        "prompt_template": (
+            "Add structured logging to the existing project. "
+            "Include: logging configuration with JSON format, log rotation, "
+            "request/response logging middleware, error logging with context, "
+            "log level configuration via environment variable, and log tests."
+        ),
+        "typical_files": [
+            "src/logging_config.py",
+            "src/middleware/logging.py",
+            "tests/test_logging.py",
+        ],
+    },
+    "ci-cd": {
+        "description": "Add CI/CD pipeline configuration",
+        "applicable_to": ["python", "node", "rust", "go"],
+        "prompt_template": (
+            "Add CI/CD pipeline configuration to the existing project. "
+            "Include: GitHub Actions workflow for lint + test + build, "
+            "Dockerfile with multi-stage build, docker-compose for local dev, "
+            ".env.example file, and Makefile with common commands."
+        ),
+        "typical_files": [
+            ".github/workflows/ci.yml",
+            "Dockerfile",
+            "docker-compose.yml",
+            "Makefile",
+        ],
+    },
+}
+
+
+def list_feature_patterns() -> dict[str, str]:
+    """Get dict of pattern names and descriptions."""
+    return {
+        name: info["description"]
+        for name, info in FEATURE_PATTERNS.items()
+    }
+
+
+def apply_feature_pattern(
+    pattern_name: str,
+    resource: str = "",
+    feature: str = "",
+    project_tech: list[str] | None = None,
+) -> Optional[str]:
+    """Generate a scoped prompt from a feature pattern.
+
+    Args:
+        pattern_name: Name of the pattern (e.g., "rest-endpoint")
+        resource: Resource name for the pattern (e.g., "users")
+        feature: Feature name for patterns that use it
+        project_tech: Current project's tech stack for compatibility check
+
+    Returns:
+        Formatted prompt string, or None if pattern not found.
+    """
+    pattern = FEATURE_PATTERNS.get(pattern_name)
+    if not pattern:
+        console.print(f"[red]Unknown feature pattern: {pattern_name}[/red]")
+        available = ", ".join(FEATURE_PATTERNS.keys())
+        console.print(f"[dim]Available patterns: {available}[/dim]")
+        return None
+
+    # Check tech compatibility if project tech is known
+    if project_tech:
+        applicable = pattern.get("applicable_to", [])
+        project_tech_lower = [t.lower() for t in project_tech]
+        if applicable and not any(
+            t in project_tech_lower for t in applicable
+        ):
+            console.print(
+                f"[yellow]⚠ Pattern '{pattern_name}' is designed for "
+                f"{', '.join(applicable)} but project uses "
+                f"{', '.join(project_tech)}[/yellow]"
+            )
+
+    prompt = pattern["prompt_template"].format(
+        resource=resource or "resource",
+        feature=feature or "feature",
+    )
+
+    return prompt
+
+
+def display_feature_patterns():
+    """Pretty-print all available feature patterns."""
+    table = Table(
+        title="🧩 Feature Patterns",
+        border_style="dim",
+        show_lines=False,
+    )
+    table.add_column("Pattern", style="cyan", min_width=18)
+    table.add_column("Description")
+    table.add_column("Applicable To", style="dim")
+
+    for name, info in sorted(FEATURE_PATTERNS.items()):
+        table.add_row(
+            name,
+            info["description"],
+            ", ".join(info.get("applicable_to", [])[:4]),
+        )
+
+    console.print()
+    console.print(table)
+    console.print(
+        "\n[dim]Usage: /pattern <name> <resource-name>[/dim]"
+    )
+    console.print(
+        "[dim]Example: /pattern rest-endpoint users[/dim]"
+    )
+    console.print()
