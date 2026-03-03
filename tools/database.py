@@ -126,7 +126,7 @@ def tool_db_schema(args: str) -> str:
         )
         rows = cursor.fetchall()
         if not rows:
-            return f"Database '{db_path}' has no tables or views."
+            return f"Database '{path}' has no tables or views."
         parts = []
         for row in rows:
             parts.append(f"-- {row['type']}: {row['name']}")
@@ -159,7 +159,7 @@ def tool_db_tables(args: str) -> str:
         )
         tables = [row["name"] for row in cursor.fetchall()]
         if not tables:
-            return f"Database '{db_path}' has no tables."
+            return f"Database '{path}' has no tables."
         lines = []
         for table in tables:
             try:
@@ -167,7 +167,7 @@ def tool_db_tables(args: str) -> str:
             except sqlite3.Error:
                 count = "?"
             lines.append(f"  {table}: {count} rows")
-        return f"Tables in {db_path}:\n" + "\n".join(lines)
+        return f"Tables in {path}:\n" + "\n".join(lines)
     except sqlite3.Error as e:
         return f"Error listing tables: {e}"
     finally:
