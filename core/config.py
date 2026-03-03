@@ -62,6 +62,12 @@ DEFAULT_CONFIG = {
     "memory_relevance_scoring": True,         # TF-IDF memory retrieval vs recency
     "learning_rate": 1.0,                     # Naive Bayes smoothing alpha
     "outcome_feedback_mode": "auto",          # "auto" / "explicit" / "off"
+
+    # Quality enforcement settings
+    "prompt_optimization": True,              # Inject ML-selected prompt strategies
+    "response_validation": True,              # Validate response quality
+    "quality_auto_retry": True,               # Auto-retry on quality failure
+    "quality_min_score": 0.5,                 # Minimum quality score to pass
 }
 
 # ── Config value validation ────────────────────────────────────
@@ -93,6 +99,10 @@ _CONFIG_VALIDATORS = {
     "outcome_feedback_mode": lambda v: v in ("auto", "explicit", "off"),
     "sandbox_mode": lambda v: v in ("strict", "normal", "off"),
     "secret_scanning": lambda v: isinstance(v, bool),
+    "prompt_optimization": lambda v: isinstance(v, bool),
+    "response_validation": lambda v: isinstance(v, bool),
+    "quality_auto_retry": lambda v: isinstance(v, bool),
+    "quality_min_score": lambda v: isinstance(v, (int, float)) and 0.0 <= v <= 1.0,
 }
 
 # Config values that should be parsed as booleans
@@ -101,6 +111,7 @@ _BOOL_KEYS = {
     "confirm_destructive",
     "adaptive_routing", "memory_relevance_scoring",
     "secret_scanning",
+    "prompt_optimization", "response_validation", "quality_auto_retry",
 }
 
 # Config values that should be parsed as integers
@@ -115,6 +126,7 @@ _FLOAT_KEYS = {
     "temperature",
     "context_warn_threshold", "context_compact_threshold", "context_force_threshold",
     "learning_rate",
+    "quality_min_score",
 }
 
 # ── Paths ──────────────────────────────────────────────────────

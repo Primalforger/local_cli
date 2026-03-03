@@ -8,4 +8,10 @@ def __getattr__(name):
     if name == "OutcomeTracker":
         from adaptive.outcome_tracker import OutcomeTracker
         return OutcomeTracker
+    if name == "PromptOptimizer":
+        from adaptive.prompt_optimizer import PromptOptimizer
+        return PromptOptimizer
+    if name == "ResponseValidator":
+        from adaptive.response_validator import ResponseValidator
+        return ResponseValidator
     raise AttributeError(f"module 'adaptive' has no attribute {name!r}")

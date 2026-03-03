@@ -560,6 +560,23 @@ class ChatSession:
         except ImportError:
             pass
 
+        # Prompt optimizer (soft steering)
+        self._prompt_optimizer = None
+        self._current_strategy = ""
+        try:
+            from adaptive.prompt_optimizer import PromptOptimizer
+            self._prompt_optimizer = PromptOptimizer()
+        except ImportError:
+            pass
+
+        # Response quality validator
+        self._response_validator = None
+        try:
+            from adaptive.response_validator import ResponseValidator
+            self._response_validator = ResponseValidator()
+        except ImportError:
+            pass
+
         # Load project memory
         memory_context = ""
         try:
@@ -807,6 +824,22 @@ class ChatSession:
         if self._router and self._router.mode != "manual":
             self.config["model"] = self._router.route(user_input)
 
+        # Soft steering: inject ML-optimized prompt addition
+        self._current_strategy = ""
+        if (
+            self._prompt_optimizer is not None
+            and self.config.get("prompt_optimization", True)
+        ):
+            strategy = self._prompt_optimizer.get_prompt_addition(
+                self._current_task_type
+            )
+            if strategy:
+                self._current_strategy = strategy
+                self.messages.append({
+                    "role": "system",
+                    "content": f"[Task guidance]\n{strategy}",
+                })
+
         self.messages.append({"role": "user", "content": user_input})
 
         # Tool loop
@@ -890,7 +923,56 @@ class ChatSession:
             })
 
         self._hallucination_retries = 0
+
+        # Active correction: validate final response quality
+        _was_corrected = False
+        _validation_result = None
+        if (
+            self._response_validator is not None
+            and self.config.get("response_validation", True)
+            and response
+            and not response.startswith("[SYSTEM:")
+        ):
+            _validation_result = self._response_validator.validate(
+                response=response,
+                task_type=self._current_task_type,
+                user_input=user_input,
+                tool_calls_made=self._tool_calls_this_turn,
+                iteration_count=iteration + 1,
+            )
+            if not _validation_result.passed and self.config.get("quality_auto_retry", True):
+                console.print(
+                    "\n[yellow]Quality check: issues detected, "
+                    "auto-correcting...[/yellow]"
+                )
+                for issue in _validation_result.issues[:3]:
+                    console.print(f"  [dim]- {issue.message}[/dim]")
+
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "[SYSTEM: Quality check failed]\n\n"
+                        + _validation_result.correction_hint
+                    ),
+                })
+                console.print("\n[bold blue]Assistant (corrected):[/bold blue]")
+                response = stream_response(self.messages, self.config)
+                if response:
+                    self.messages.append({"role": "assistant", "content": response})
+                    _was_corrected = True
+
         self._show_context_usage()
+
+        # Record prompt strategy outcome
+        if self._prompt_optimizer and self._current_strategy:
+            try:
+                self._prompt_optimizer.record_outcome(
+                    task_type=self._current_task_type,
+                    strategy_text=self._current_strategy,
+                    success=not _was_corrected,
+                )
+            except Exception:
+                pass
 
         # Record outcome for adaptive learning
         if (
@@ -899,6 +981,13 @@ class ChatSession:
             and response
         ):
             try:
+                _quality_score = -1.0
+                _quality_issues: list[str] = []
+                if _validation_result is not None:
+                    _quality_score = _validation_result.score
+                    _quality_issues = [
+                        issue.message for issue in _validation_result.issues
+                    ]
                 self._outcome_tracker.record(
                     session_id=self._session_id,
                     task_type=self._current_task_type,
@@ -906,6 +995,10 @@ class ChatSession:
                     outcome="success" if response else "failure",
                     tool_sequence=self._tool_calls_this_turn,
                     prompt_preview=user_input[:200],
+                    prompt_strategy=self._current_strategy,
+                    quality_score=_quality_score,
+                    quality_issues=_quality_issues,
+                    auto_corrected=_was_corrected,
                 )
             except Exception:
                 pass  # Best effort — never block chat

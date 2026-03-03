@@ -1478,6 +1478,45 @@ def _handle_adaptive(arg: str, session, config: dict):
                 console.print(table)
             else:
                 console.print("[dim]No performance data yet.[/dim]")
+
+            # Prompt strategy performance
+            if (
+                hasattr(session, "_prompt_optimizer")
+                and session._prompt_optimizer
+            ):
+                strategy_stats = session._prompt_optimizer.get_stats()
+                if strategy_stats:
+                    strat_table = Table(
+                        title="Prompt Strategy Performance",
+                        border_style="dim",
+                    )
+                    strat_table.add_column("Task Type", style="cyan")
+                    strat_table.add_column("Strategy (preview)", style="white")
+                    strat_table.add_column("Wins", justify="center")
+                    strat_table.add_column("Losses", justify="center")
+                    strat_table.add_column("Rate", justify="center")
+
+                    for task_type, strategies in sorted(strategy_stats.items()):
+                        for strat_text, s in sorted(
+                            strategies.items(),
+                            key=lambda x: -(x[1].get("wins", 0)),
+                        ):
+                            wins = s.get("wins", 0)
+                            losses = s.get("losses", 0)
+                            total = wins + losses
+                            rate = wins / total if total > 0 else 0
+                            rate_color = (
+                                "green" if rate >= 0.7
+                                else "yellow" if rate >= 0.4
+                                else "red"
+                            )
+                            preview = strat_text[:60] + ("..." if len(strat_text) > 60 else "")
+                            strat_table.add_row(
+                                task_type, preview,
+                                str(wins), str(losses),
+                                f"[{rate_color}]{rate:.0%}[/]",
+                            )
+                    console.print(strat_table)
         else:
             console.print(
                 "[dim]Adaptive routing not enabled. "
@@ -1559,6 +1598,18 @@ def _handle_feedback(arg: str, session):
             task_type=session._current_task_type,
             success=(feedback == "good"),
         )
+
+    # Record prompt strategy outcome on explicit feedback
+    if hasattr(session, "_prompt_optimizer") and session._prompt_optimizer:
+        if hasattr(session, "_current_strategy") and session._current_strategy:
+            try:
+                session._prompt_optimizer.record_outcome(
+                    task_type=getattr(session, "_current_task_type", "chat"),
+                    strategy_text=session._current_strategy,
+                    success=(feedback == "good"),
+                )
+            except Exception:
+                pass
 
     if updated or feedback:
         emoji = "+" if feedback == "good" else "-"

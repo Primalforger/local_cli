@@ -30,6 +30,10 @@ class OutcomeRecord:
     fix_attempts: int = 0
     user_feedback: str = ""  # "good" / "bad" / ""
     prompt_preview: str = ""  # First 200 chars of prompt
+    prompt_strategy: str = ""
+    quality_score: float = -1.0
+    quality_issues: list[str] = field(default_factory=list)
+    auto_corrected: bool = False
 
 
 class OutcomeTracker:
@@ -90,6 +94,10 @@ class OutcomeTracker:
         fix_attempts: int = 0,
         user_feedback: str = "",
         prompt_preview: str = "",
+        prompt_strategy: str = "",
+        quality_score: float = -1.0,
+        quality_issues: list[str] | None = None,
+        auto_corrected: bool = False,
     ) -> OutcomeRecord:
         """Record a task outcome.
 
@@ -102,6 +110,10 @@ class OutcomeTracker:
             fix_attempts: Number of fix attempts made
             user_feedback: Explicit user feedback ("good"/"bad")
             prompt_preview: First 200 chars of the prompt
+            prompt_strategy: ML-selected prompt strategy used
+            quality_score: Quality score from ResponseValidator (-1 if not run)
+            quality_issues: List of quality issue messages
+            auto_corrected: Whether the response was auto-corrected
 
         Returns:
             The created OutcomeRecord.
@@ -116,6 +128,10 @@ class OutcomeTracker:
             fix_attempts=fix_attempts,
             user_feedback=user_feedback,
             prompt_preview=prompt_preview[:200],
+            prompt_strategy=prompt_strategy,
+            quality_score=quality_score,
+            quality_issues=quality_issues or [],
+            auto_corrected=auto_corrected,
         )
         self._records.append(record)
         self._save()
