@@ -33,6 +33,19 @@ DEFAULT_CONFIG = {
     "max_fix_attempts": 5,
     "route_mode": "manual",
 
+    # Streaming / retry settings
+    "streaming_timeout": 120,
+    "max_retries": 2,
+
+    # Context thresholds
+    "context_warn_threshold": 0.75,
+    "context_compact_threshold": 0.85,
+    "context_force_threshold": 0.95,
+
+    # Limits
+    "undo_max_history": 50,
+    "preview_max_bytes": 3000,
+
     # Auto-apply settings
     "auto_apply": False,          # Auto-apply file changes (no confirmation)
     "auto_apply_fixes": False,    # Auto-apply error fixes (no confirmation)
@@ -50,6 +63,13 @@ _CONFIG_VALIDATORS = {
     "max_tokens": lambda v: isinstance(v, int) and 256 <= v <= 32768,
     "max_fix_attempts": lambda v: isinstance(v, int) and 1 <= v <= 20,
     "route_mode": lambda v: v in ("manual", "auto", "fast", "quality"),
+    "streaming_timeout": lambda v: isinstance(v, int) and 10 <= v <= 600,
+    "max_retries": lambda v: isinstance(v, int) and 0 <= v <= 10,
+    "context_warn_threshold": lambda v: isinstance(v, (int, float)) and 0.1 <= v <= 1.0,
+    "context_compact_threshold": lambda v: isinstance(v, (int, float)) and 0.1 <= v <= 1.0,
+    "context_force_threshold": lambda v: isinstance(v, (int, float)) and 0.1 <= v <= 1.0,
+    "undo_max_history": lambda v: isinstance(v, int) and 5 <= v <= 500,
+    "preview_max_bytes": lambda v: isinstance(v, int) and 500 <= v <= 50000,
     "auto_apply": lambda v: isinstance(v, bool),
     "auto_apply_fixes": lambda v: isinstance(v, bool),
     "auto_run_commands": lambda v: isinstance(v, bool),
@@ -66,11 +86,13 @@ _BOOL_KEYS = {
 # Config values that should be parsed as integers
 _INT_KEYS = {
     "num_ctx", "max_tokens", "max_fix_attempts",
+    "streaming_timeout", "max_retries", "undo_max_history", "preview_max_bytes",
 }
 
 # Config values that should be parsed as floats
 _FLOAT_KEYS = {
     "temperature",
+    "context_warn_threshold", "context_compact_threshold", "context_force_threshold",
 }
 
 # ── Paths ──────────────────────────────────────────────────────

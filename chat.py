@@ -906,14 +906,20 @@ def stream_response(messages: list[dict], config: dict) -> str:
     }
 
     full_response = ""
-    max_retries = 2
+    max_retries = config.get("max_retries", 2)
+    streaming_timeout = config.get("streaming_timeout", 120)
     tracker.start_request()
 
     for retry in range(max_retries + 1):
+        if retry > 0:
+            import time
+            backoff = min(2 ** retry, 16)
+            console.print(f"[dim]Waiting {backoff}s before retry...[/dim]")
+            time.sleep(backoff)
         try:
             if _show_streaming():
                 with httpx.stream(
-                    "POST", url, json=payload, timeout=120.0
+                    "POST", url, json=payload, timeout=float(streaming_timeout)
                 ) as resp:
                     resp.raise_for_status()
                     for line in resp.iter_lines():
@@ -933,7 +939,7 @@ def stream_response(messages: list[dict], config: dict) -> str:
                     spinner_style="cyan",
                 ) as status:
                     with httpx.stream(
-                        "POST", url, json=payload, timeout=120.0
+                        "POST", url, json=payload, timeout=float(streaming_timeout)
                     ) as resp:
                         resp.raise_for_status()
                         for line in resp.iter_lines():
@@ -957,6 +963,13 @@ def stream_response(messages: list[dict], config: dict) -> str:
             break
 
         except httpx.ConnectError:
+            if retry < max_retries:
+                console.print(
+                    f"\n[yellow]Cannot connect to Ollama. "
+                    f"Retrying ({retry + 1}/{max_retries})...[/yellow]"
+                )
+                full_response = ""
+                continue
             console.print(
                 "\n[red]Error: Cannot connect to Ollama. "
                 "Is it running?[/red]"
@@ -996,7 +1009,19 @@ def stream_response(messages: list[dict], config: dict) -> str:
             console.print(
                 f"\n[red]HTTP Error: {e.response.status_code}[/red]"
             )
-            if e.response.status_code == 404:
+            if e.response.status_code == 404 and retry < max_retries:
+                try:
+                    from model_router import ensure_model_available
+                    new_model = ensure_model_available(
+                        config["model"], config["ollama_url"]
+                    )
+                    if new_model != config["model"]:
+                        config["model"] = new_model
+                        payload["model"] = new_model
+                        full_response = ""
+                        continue
+                except Exception:
+                    pass
                 console.print(
                     f"[dim]Model '{config['model']}' not found. "
                     f"Try: /models to see available models[/dim]"
@@ -1037,6 +1062,11 @@ class ChatSession:
         self.budget = ContextBudget(
             max_ctx=config.get("num_ctx", 32768),
             reserve_output=config.get("max_tokens", 4096),
+            warning_threshold=config.get("context_warn_threshold", 0.75),
+            compact_threshold=config.get("context_compact_threshold", 0.85),
+            critical_threshold=config.get("context_force_threshold", 0.95),
+            model=config.get("model", ""),
+            ollama_url=config.get("ollama_url", ""),
         )
 
         self._warned_context = False

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-ai-cli"
+version = "0.1.0"
+description = "A feature-rich command-line coding assistant powered by Ollama (local LLMs)"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "httpx>=0.24",
+    "rich>=13.0",
+    "prompt_toolkit>=3.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+ai = "cli:main"
+
+[tool.setuptools]
+py-modules = [
+    "aiignore",
+    "builder",
+    "chat",
+    "cli",
+    "clipboard",
+    "config",
+    "context_manager",
+    "diff_editor",
+    "display",
+    "file_utils",
+    "git_integration",
+    "logging_util",
+    "memory",
+    "metrics",
+    "model_router",
+    "planner",
+    "project_context",
+    "project_reviewer",
+    "prompts",
+    "session_manager",
+    "templates",
+    "tools",
+    "undo",
+    "watch_mode",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "S"]
+ignore = ["E501", "S603", "S607", "B904"]

@@ -1,6 +1,7 @@
 """Git integration — auto-commit, diff, rollback, branch management."""
 
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -97,8 +98,7 @@ def run_git(args: str, cwd: str = ".", timeout: int = 30) -> dict:
 
     try:
         result = subprocess.run(
-            f"git {args}",
-            shell=True,
+            ["git"] + shlex.split(args),
             capture_output=True,
             text=True,
             cwd=cwd,

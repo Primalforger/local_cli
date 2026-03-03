@@ -13,32 +13,82 @@ console = Console()
 
 # ── Token Estimation ───────────────────────────────────────────
 
-# Better estimation using character classes
-def estimate_tokens(text: str) -> int:
+# Cache for Ollama tokenization results (text hash -> token count)
+_token_cache: dict[int, int] = {}
+_TOKEN_CACHE_MAX = 1000
+
+
+def _ollama_tokenize(text: str, model: str, ollama_url: str) -> int | None:
+    """Try to get exact token count from Ollama's tokenize endpoint.
+
+    Returns None on any failure (timeout, connection error, etc.).
     """
-    Estimate token count. More accurate than len/4.
-    Based on typical BPE tokenizer behavior.
-    """
+    text_hash = hash(text)
+    if text_hash in _token_cache:
+        return _token_cache[text_hash]
+
+    try:
+        resp = httpx.post(
+            f"{ollama_url}/api/tokenize",
+            json={"model": model, "text": text},
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        tokens = resp.json().get("tokens", [])
+        count = len(tokens)
+
+        # Cache the result
+        if len(_token_cache) >= _TOKEN_CACHE_MAX:
+            # Evict oldest entries (clear half the cache)
+            keys = list(_token_cache.keys())
+            for k in keys[:_TOKEN_CACHE_MAX // 2]:
+                del _token_cache[k]
+        _token_cache[text_hash] = count
+        return count
+    except Exception:
+        return None
+
+
+def _heuristic_tokens(text: str) -> int:
+    """Heuristic token estimation based on character classes."""
     if not text:
         return 0
-    # Count different character types
     words = len(text.split())
-    # Rough: 1 word ≈ 1.3 tokens for English
-    # Code has more tokens per word due to symbols
     code_indicators = text.count("{") + text.count("}") + text.count("(") + text.count(")")
     if code_indicators > words * 0.1:
-        # Code-heavy content
         return int(words * 1.5)
     return int(words * 1.3)
 
 
-def estimate_message_tokens(messages: list[dict]) -> int:
+def estimate_tokens(
+    text: str,
+    model: str = "",
+    ollama_url: str = "",
+) -> int:
+    """Estimate token count. Tries Ollama API first, falls back to heuristic."""
+    if not text:
+        return 0
+
+    # Try exact tokenization if model info is provided
+    if model and ollama_url:
+        exact = _ollama_tokenize(text, model, ollama_url)
+        if exact is not None:
+            return exact
+
+    return _heuristic_tokens(text)
+
+
+def estimate_message_tokens(
+    messages: list[dict],
+    model: str = "",
+    ollama_url: str = "",
+) -> int:
     """Estimate total tokens in conversation."""
     total = 0
     for msg in messages:
         # Each message has overhead (~4 tokens for role/formatting)
         total += 4
-        total += estimate_tokens(msg.get("content", ""))
+        total += estimate_tokens(msg.get("content", ""), model, ollama_url)
     return total
 
 
@@ -47,17 +97,28 @@ def estimate_message_tokens(messages: list[dict]) -> int:
 class ContextBudget:
     """Track and manage context window budget."""
 
-    def __init__(self, max_ctx: int = 32768, reserve_output: int = 4096):
+    def __init__(
+        self,
+        max_ctx: int = 32768,
+        reserve_output: int = 4096,
+        warning_threshold: float = 0.75,
+        compact_threshold: float = 0.85,
+        critical_threshold: float = 0.95,
+        model: str = "",
+        ollama_url: str = "",
+    ):
         self.max_ctx = max_ctx
         self.reserve_output = reserve_output  # Reserve for model output
         self.available = max_ctx - reserve_output
-        self.warning_threshold = 0.75  # Warn at 75% usage
-        self.compact_threshold = 0.85  # Auto-compact at 85%
-        self.critical_threshold = 0.95  # Force compact at 95%
+        self.warning_threshold = warning_threshold
+        self.compact_threshold = compact_threshold
+        self.critical_threshold = critical_threshold
+        self.model = model
+        self.ollama_url = ollama_url
 
     def usage(self, messages: list[dict]) -> dict:
         """Get detailed context usage stats."""
-        tokens = estimate_message_tokens(messages)
+        tokens = estimate_message_tokens(messages, self.model, self.ollama_url)
         used_pct = tokens / self.available if self.available > 0 else 1.0
 
         # Break down by message type
@@ -67,7 +128,7 @@ class ContextBudget:
         tool_tokens = 0
 
         for msg in messages:
-            t = estimate_tokens(msg.get("content", ""))
+            t = estimate_tokens(msg.get("content", ""), self.model, self.ollama_url)
             role = msg.get("role", "")
             if role == "system":
                 system_tokens += t

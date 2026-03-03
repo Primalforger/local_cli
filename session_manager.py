@@ -5,12 +5,30 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from file_utils import atomic_write
+
 from rich.console import Console
 from rich.table import Table
 
 from config import SESSIONS_DIR
 
 console = Console()
+
+
+def _validate_session_data(data: dict) -> bool:
+    """Validate that loaded session data has the expected structure."""
+    if not isinstance(data, dict):
+        return False
+    if not isinstance(data.get("messages"), list):
+        return False
+    if not isinstance(data.get("model", ""), str):
+        return False
+    for msg in data["messages"]:
+        if not isinstance(msg, dict):
+            return False
+        if "role" not in msg or "content" not in msg:
+            return False
+    return True
 
 
 def save_session(
@@ -42,9 +60,26 @@ def save_session(
         "message_count": len(messages),
         "messages": messages,
     }
-    path.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
+    atomic_write(path, json.dumps(session_data, indent=2))
     console.print(f"[green]Session saved: {path.name}[/green]")
     return path
+
+
+def _load_session_file(path: Path) -> dict | None:
+    """Load and validate a single session file, returning None on failure."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        console.print(f"[yellow]Corrupted session file: {path.name}[/yellow]")
+        return None
+    except OSError as e:
+        console.print(f"[yellow]Cannot read session: {e}[/yellow]")
+        return None
+
+    if not _validate_session_data(data):
+        console.print(f"[yellow]Invalid session data in: {path.name}[/yellow]")
+        return None
+    return data
 
 
 def load_session(query: str) -> tuple[list[dict], dict] | None:
@@ -54,19 +89,23 @@ def load_session(query: str) -> tuple[list[dict], dict] | None:
         sessions = sorted(SESSIONS_DIR.glob("*.json"), reverse=True)
         idx = int(query) - 1
         if 0 <= idx < len(sessions):
-            data = json.loads(sessions[idx].read_text(encoding="utf-8"))
+            data = _load_session_file(sessions[idx])
+            if data is None:
+                return None
             console.print(f"[green]Loaded: {sessions[idx].name}[/green]")
             console.print(
-                f"[dim]{data['message_count']} messages, "
-                f"model: {data['model']}[/dim]"
+                f"[dim]{data.get('message_count', '?')} messages, "
+                f"model: {data.get('model', 'unknown')}[/dim]"
             )
-            return data["messages"], {"model": data["model"]}
+            return data["messages"], {"model": data.get("model", "unknown")}
 
     matches = list(SESSIONS_DIR.glob(f"*{query}*.json"))
     if len(matches) == 1:
-        data = json.loads(matches[0].read_text(encoding="utf-8"))
+        data = _load_session_file(matches[0])
+        if data is None:
+            return None
         console.print(f"[green]Loaded: {matches[0].name}[/green]")
-        return data["messages"], {"model": data["model"]}
+        return data["messages"], {"model": data.get("model", "unknown")}
     elif len(matches) > 1:
         console.print("[yellow]Multiple matches:[/yellow]")
         for m in matches[:10]:
@@ -101,7 +140,7 @@ def list_sessions(count: int = 20):
                 str(data.get("message_count", "?")),
                 data.get("timestamp", "?")[:10],
             )
-        except Exception:
+        except (json.JSONDecodeError, OSError, KeyError):
             table.add_row(str(i), path.stem, "?", "?", "?")
     console.print(table)
 
@@ -120,7 +159,7 @@ def search_sessions(query: str):
                         "preview": msg["content"][:200],
                     })
                     break
-        except Exception:
+        except (json.JSONDecodeError, OSError, KeyError):
             continue
 
     if results:

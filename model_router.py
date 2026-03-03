@@ -387,6 +387,65 @@ def _score_model(
     return score
 
 
+def ensure_model_available(
+    model: str,
+    ollama_url: str,
+    available: list[str] | None = None,
+) -> str:
+    """Ensure a model is available, falling back if not.
+
+    Tries (in order):
+    1. Exact match in available models
+    2. Partial name match (e.g., "qwen2.5-coder" matches "qwen2.5-coder:14b")
+    3. Same-category model from profiles
+    4. First available model
+
+    Returns:
+        Available model name, or the original if nothing found.
+    """
+    if available is None:
+        available = get_available_models(ollama_url)
+
+    if not available:
+        return model
+
+    # 1. Exact match
+    if model in available:
+        return model
+
+    # 2. Partial name match (base name without tag)
+    base = model.split(":")[0]
+    for avail in available:
+        if avail.split(":")[0] == base:
+            console.print(
+                f"[yellow]Model '{model}' not found, "
+                f"using '{avail}' instead[/yellow]"
+            )
+            return avail
+
+    # 3. Same-category match
+    target_profile = get_model_profile(model)
+    target_category = target_profile.get("category", "")
+    if target_category:
+        for avail in available:
+            profile = get_model_profile(avail)
+            if profile.get("category") == target_category:
+                console.print(
+                    f"[yellow]Model '{model}' not available, "
+                    f"falling back to '{avail}' "
+                    f"(same category: {target_category})[/yellow]"
+                )
+                return avail
+
+    # 4. First available
+    fallback = available[0]
+    console.print(
+        f"[yellow]Model '{model}' not available, "
+        f"falling back to '{fallback}'[/yellow]"
+    )
+    return fallback
+
+
 def route_model(
     prompt: str,
     ollama_url: str,
@@ -406,12 +465,13 @@ def route_model(
     """
     fallback = preferred_model or "qwen2.5-coder:14b"
 
-    # Manual mode = always use preferred
-    if mode == "manual":
-        return fallback
-
-    # Get available models
+    # Get available models (shared across modes)
     available = get_available_models(ollama_url)
+
+    # Manual mode = use preferred, but fall back if unavailable
+    if mode == "manual":
+        return ensure_model_available(fallback, ollama_url, available)
+
     if not available:
         return fallback
 

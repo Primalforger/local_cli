@@ -1,5 +1,6 @@
 """MVP Builder — execute plans step-by-step with auto-test feedback loops."""
 
+import hashlib
 import json
 import os
 import re
@@ -701,6 +702,11 @@ def detect_project_type(base_dir: Path, plan: dict) -> dict:
 def run_cmd(
     command: str, timeout: int = 120, cwd: str = None
 ) -> dict:
+    """Run a shell command and return structured result.
+
+    Uses shell=True because callers pass arbitrary user-specified commands
+    that may include pipes, redirects, and shell expansions.
+    """
     if not command or not command.strip():
         return {
             "success": False,
@@ -712,7 +718,7 @@ def run_cmd(
     try:
         result = subprocess.run(
             command,
-            shell=True,
+            shell=True,  # Intentional: supports pipes/redirects in user commands
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -1761,6 +1767,8 @@ def run_validation_pipeline(
         )
 
         passed = False
+        _seen_error_hashes: set[str] = set()
+        _last_error_hash: str = ""
         for attempt in range(MAX_FIX_ATTEMPTS):
             if stage_type == "xref":
                 passed = _validate_xref(
@@ -1781,6 +1789,22 @@ def run_validation_pipeline(
 
             if passed:
                 break
+
+            # Detect duplicate errors — bail early if stuck in a loop.
+            # Re-run the command to capture its current output for hashing.
+            if stage_type == "command" and stage_cmd:
+                probe = run_cmd(stage_cmd, cwd=str(base_dir))
+                sig_data = (probe.get("stdout", "") + probe.get("stderr", "")).strip()
+            else:
+                sig_data = f"{stage_name}:{stage_type}:{passed}"
+            error_hash = hashlib.md5(sig_data.encode()).hexdigest()
+            if error_hash == _last_error_hash:
+                console.print(
+                    "[yellow]Same error repeated — skipping "
+                    "remaining fix attempts[/yellow]"
+                )
+                break
+            _last_error_hash = error_hash
 
         if not passed:
             if not handle_validation_failure(stage_name):

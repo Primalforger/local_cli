@@ -4,6 +4,7 @@ import subprocess
 import os
 import sys
 import json
+import shlex
 import shutil
 import re
 import socket
@@ -356,23 +357,50 @@ def _clean_fences(content: str) -> str:
 
 
 def _validate_path(filepath: str, must_exist: bool = True) -> tuple[Optional[Path], Optional[str]]:
-    """Validate and resolve a file path within the project boundary."""
+    """Validate and resolve a file path within the project boundary.
+
+    Uses strict resolution for existing paths (follows symlinks) and
+    checks the parent directory for new paths to prevent symlink escapes.
+    """
     if not filepath or not filepath.strip():
         return None, "Error: Empty file path"
     filepath = filepath.strip().strip("'\"")
+
+    cwd = Path.cwd().resolve()
+
+    if must_exist:
+        # Strict resolve — follows symlinks to their real target
+        try:
+            path = Path(filepath).resolve(strict=True)
+        except (OSError, ValueError) as e:
+            return None, f"Error: Invalid path '{filepath}': {e}"
+
+        try:
+            path.relative_to(cwd)
+        except ValueError:
+            return None, f"Error: Path '{filepath}' is outside the project directory."
+
+        return path, None
+
+    # For new files: resolve without strict, also check parent stays in CWD
     try:
         path = Path(filepath).resolve()
     except (OSError, ValueError) as e:
         return None, f"Error: Invalid path '{filepath}': {e}"
 
-    # Enforce project boundary — no escaping outside CWD
     try:
-        path.relative_to(Path.cwd().resolve())
+        path.relative_to(cwd)
     except ValueError:
         return None, f"Error: Path '{filepath}' is outside the project directory."
 
-    if must_exist and not path.exists():
-        return None, f"Error: File not found: {filepath}"
+    # If the parent exists, resolve it strictly to catch symlink escapes
+    if path.parent.exists():
+        try:
+            real_parent = path.parent.resolve(strict=True)
+            real_parent.relative_to(cwd)
+        except (OSError, ValueError):
+            return None, f"Error: Path '{filepath}' resolves outside the project directory."
+
     return path, None
 
 
@@ -811,8 +839,8 @@ def tool_patch_file(args: str) -> str:
             patch_path = f.name
 
         result = subprocess.run(
-            f'patch "{path}" "{patch_path}"',
-            shell=True, capture_output=True, text=True, timeout=10,
+            ["patch", str(path), patch_path],
+            capture_output=True, text=True, timeout=10,
         )
         os.unlink(patch_path)
 
@@ -1427,16 +1455,29 @@ def tool_grep_context(args: str) -> str:
 
 # ── SHELL / COMMANDS ───────────────────────────────────────────
 
-DANGEROUS_COMMANDS = [
-    "rm -rf /", "rm -rf /*", "rm -rf ~",
-    "format c:", "format d:",
-    "del /f /s /q c:", "del /f /s /q d:",
-    ":(){:|:&};:",
-    "mkfs.", "dd if=",
-    "> /dev/sda",
-    "chmod -R 777 /",
-    "sudo rm -rf",
+_DANGEROUS_PATTERNS = [
+    re.compile(r'rm\s+-\w*r\w*f\w*\s+/', re.IGNORECASE),          # rm -rf /
+    re.compile(r'rm\s+-\w*r\w*f\w*\s+~', re.IGNORECASE),          # rm -rf ~
+    re.compile(r'rm\s+-\w*r\w*f\w*\s+/\*', re.IGNORECASE),        # rm -rf /*
+    re.compile(r'sudo\s+rm\s+-\w*r\w*f', re.IGNORECASE),          # sudo rm -rf
+    re.compile(r'format\s+[a-z]:', re.IGNORECASE),                 # format c:
+    re.compile(r'del\s+/\w+\s+.*[a-z]:\\', re.IGNORECASE),        # del /f /s /q c:\
+    re.compile(r':\(\)\s*\{.*\|.*&\s*\}\s*;', re.IGNORECASE),     # fork bomb
+    re.compile(r'mkfs\.', re.IGNORECASE),                          # mkfs.*
+    re.compile(r'dd\s+if=', re.IGNORECASE),                        # dd if=
+    re.compile(r'>\s*/dev/sd[a-z]', re.IGNORECASE),                # > /dev/sda
+    re.compile(r'chmod\s+-R\s+777\s+/', re.IGNORECASE),           # chmod -R 777 /
+    re.compile(r'\$\(.*rm\s+-\w*r\w*f', re.IGNORECASE),           # $(rm -rf ...)
+    re.compile(r'`.*rm\s+-\w*r\w*f', re.IGNORECASE),              # `rm -rf ...`
+    re.compile(r'eval\s+.*rm\s+-\w*r\w*f', re.IGNORECASE),        # eval rm -rf
 ]
+
+
+def _is_dangerous_command(command: str) -> bool:
+    """Check if a command matches any dangerous pattern."""
+    # Normalize whitespace for consistent matching
+    normalized = " ".join(command.split())
+    return any(pat.search(normalized) for pat in _DANGEROUS_PATTERNS)
 
 
 def tool_run_command(args: str) -> str:
@@ -1446,7 +1487,7 @@ def tool_run_command(args: str) -> str:
     if not command:
         return "Error: Empty command"
 
-    if any(d in command.lower() for d in DANGEROUS_COMMANDS):
+    if _is_dangerous_command(command):
         return "Error: Blocked dangerous command."
 
     console.print(f"\n[yellow]Run:[/yellow] {command}")
@@ -1454,6 +1495,7 @@ def tool_run_command(args: str) -> str:
         return "Command cancelled."
 
     try:
+        # shell=True: user commands may contain pipes, redirects, shell expansions
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,
             timeout=120, cwd=os.getcwd(),
@@ -1469,7 +1511,7 @@ def tool_run_command(args: str) -> str:
         return output or "Command completed (no output)."
     except subprocess.TimeoutExpired:
         return "Error: Command timed out after 120 seconds."
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         return f"Error: {e}"
 
 
@@ -1490,17 +1532,20 @@ def tool_run_background(args: str) -> str:
             delete=False, dir=tempfile.gettempdir()
         )
         log_path = log_file.name
+        log_file.close()  # Close the temp file; open a new handle for Popen
 
+        # shell=True: user commands may contain pipes, redirects, shell expansions
+        log_fh = open(log_path, 'w')
         if sys.platform == "win32":
             proc = subprocess.Popen(
                 command, shell=True,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                stdout=open(log_path, 'w'), stderr=subprocess.STDOUT,
+                stdout=log_fh, stderr=subprocess.STDOUT,
             )
         else:
             proc = subprocess.Popen(
                 command, shell=True,
-                stdout=open(log_path, 'w'), stderr=subprocess.STDOUT,
+                stdout=log_fh, stderr=subprocess.STDOUT,
                 preexec_fn=os.setsid,
             )
 
@@ -1509,6 +1554,7 @@ def tool_run_background(args: str) -> str:
             "command": command,
             "started": datetime.now().isoformat(),
             "log": log_path,
+            "log_fh": log_fh,
         }
 
         return (
@@ -1574,6 +1620,7 @@ def tool_run_script(args: str) -> str:
     if not interpreter:
         return f"Error: No interpreter known for {ext}. Use run_command instead."
 
+    cmd_args = shlex.split(interpreter) + [str(filepath)]
     command = f'{interpreter} "{filepath}"'
     console.print(f"\n[yellow]Run script:[/yellow] {command}")
     if not _confirm_command("Proceed? (y/n): "):
@@ -1581,7 +1628,7 @@ def tool_run_script(args: str) -> str:
 
     try:
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
+            cmd_args, capture_output=True, text=True,
             timeout=120, cwd=os.getcwd(),
         )
         output = ""
@@ -1621,6 +1668,13 @@ def tool_kill_process(args: str) -> str:
             proc_info["process"].wait(timeout=5)
         except Exception:
             proc_info["process"].kill()
+        # Close the log file handle to prevent leaks
+        log_fh = proc_info.get("log_fh")
+        if log_fh and not log_fh.closed:
+            try:
+                log_fh.close()
+            except OSError:
+                pass
         del _background_processes[target]
         return f"Killed background process PID {target} ({proc_info['command']})"
 
@@ -1638,7 +1692,7 @@ def tool_kill_process(args: str) -> str:
     # Try to kill by PID
     try:
         if sys.platform == "win32":
-            subprocess.run(f"taskkill /F /PID {target}", shell=True, capture_output=True)
+            subprocess.run(["taskkill", "/F", "/PID", str(target)], capture_output=True)
         else:
             os.kill(target, signal.SIGTERM)
         return f"Sent SIGTERM to PID {target}"

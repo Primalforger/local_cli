@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from file_utils import atomic_write
+
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -119,11 +121,7 @@ def save_memory(memory: dict, project_dir: Optional[Path] = None):
     memory["last_updated"] = datetime.now().isoformat()
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        atomic_write(path, json.dumps(memory, indent=2, ensure_ascii=False))
     except OSError as e:
         console.print(f"[red]Error saving memory: {e}[/red]")
 
@@ -138,7 +136,7 @@ def _backup_corrupted(path: Path):
             console.print(
                 f"[dim]Backed up corrupted file to {backup}[/dim]"
             )
-    except Exception:
+    except OSError:
         pass  # Best effort
 
 

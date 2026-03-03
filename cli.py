@@ -539,7 +539,7 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
     elif command == "/undo":
         if not hasattr(session, "_undo"):
             from undo import UndoManager
-            session._undo = UndoManager()
+            session._undo = UndoManager(max_history=config.get("undo_max_history", 50))
         messages = session._undo.undo()
         if messages:
             session.messages = messages
@@ -556,7 +556,7 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
         if len(session.messages) >= 3:
             if not hasattr(session, "_undo"):
                 from undo import UndoManager
-                session._undo = UndoManager()
+                session._undo = UndoManager(max_history=config.get("undo_max_history", 50))
             session._undo.save_state(
                 session.messages, config["model"], "before retry"
             )
@@ -576,7 +576,7 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
     elif command == "/branch":
         if not hasattr(session, "_undo"):
             from undo import UndoManager
-            session._undo = UndoManager()
+            session._undo = UndoManager(max_history=config.get("undo_max_history", 50))
         if arg:
             session._undo.create_branch(
                 arg, session.messages, config["model"]
