@@ -383,7 +383,12 @@ def smart_compact(
 
 
 def _model_summarize(messages: list[dict], config: dict) -> str:
-    """Use the model to summarize old messages."""
+    """Use the model to summarize old messages via OllamaBackend."""
+    try:
+        from llm_backend import OllamaBackend
+    except ImportError:
+        return f"[Previous conversation: {len(messages)} messages]"
+
     old_text = ""
     for msg in messages[:20]:  # Limit to avoid huge summaries
         content = msg["content"][:300]
@@ -395,26 +400,20 @@ def _model_summarize(messages: list[dict], config: dict) -> str:
         "errors fixed, and current state.\n\n" + old_text
     )
 
-    url = f"{config['ollama_url']}/api/chat"
-    payload = {
-        "model": config["model"],
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a conversation summarizer. "
-                    "Be extremely concise. Use bullet points."
-                ),
-            },
-            {"role": "user", "content": summary_prompt},
-        ],
-        "stream": False,
-        "options": {"temperature": 0.1, "num_predict": 300},
-    }
+    backend = OllamaBackend.from_config(config)
+    summary_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a conversation summarizer. "
+                "Be extremely concise. Use bullet points."
+            ),
+        },
+        {"role": "user", "content": summary_prompt},
+    ]
 
     try:
-        resp = httpx.post(url, json=payload, timeout=30.0)
-        return resp.json().get("message", {}).get("content", "")
+        return backend.complete(summary_messages, temperature=0.1, max_tokens=300)
     except Exception:
         return f"[Previous conversation: {len(messages)} messages]"
 
@@ -480,8 +479,16 @@ def prioritize_context(
     files: dict[str, str],
     current_task: str,
     max_chars: int = 10000,
+    task_type: str = "",
 ) -> str:
-    """Choose which files to include based on relevance to task."""
+    """Choose which files to include based on relevance to task.
+
+    Args:
+        files: Dict of file path -> content
+        current_task: Current task description
+        max_chars: Maximum characters to include
+        task_type: Optional detected task type for ML-informed bonuses
+    """
     if not files:
         return "(No project files)"
 
@@ -517,6 +524,23 @@ def prioritize_context(
         # Test files relevant when task mentions testing
         if "test" in task_lower and "test" in fname_lower:
             score += 8
+
+        # Task-type-specific relevance bonuses
+        if task_type == "testing":
+            test_indicators = ("test", "spec", "conftest", "fixture", "__test")
+            if any(ind in fname_lower for ind in test_indicators):
+                score += 8
+        elif task_type == "debugging":
+            debug_indicators = ("log", "error", "trace", "debug", "exception")
+            if any(ind in fname_lower for ind in debug_indicators):
+                score += 6
+        elif task_type == "security":
+            sec_indicators = (
+                "auth", "permission", "middleware", "security",
+                "csrf", "token", "session", "password",
+            )
+            if any(ind in fname_lower for ind in sec_indicators):
+                score += 8
 
         # Penalty for large files
         score -= len(content) / 5000

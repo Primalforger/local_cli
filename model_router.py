@@ -566,9 +566,44 @@ class ModelRouter:
         self.mode = "manual"
         self._route_count = 0
         self._model_usage: dict[str, int] = {}
+        self._adaptive_engine = None
+
+    def enable_adaptive(
+        self,
+        model_file=None,
+        min_samples: int = 20,
+        alpha: float = 1.0,
+    ) -> None:
+        """Enable adaptive ML routing.
+
+        Args:
+            model_file: Path to adaptive model file (default: from config)
+            min_samples: Minimum samples before ML kicks in
+            alpha: Naive Bayes smoothing parameter
+        """
+        try:
+            from adaptive_engine import AdaptiveEngine
+            self._adaptive_engine = AdaptiveEngine(
+                model_file=model_file,
+                min_samples=min_samples,
+                alpha=alpha,
+            )
+        except ImportError:
+            console.print(
+                "[yellow]Adaptive engine not available. "
+                "Install scikit-learn for ML routing.[/yellow]"
+            )
+
+    def disable_adaptive(self) -> None:
+        """Disable adaptive ML routing."""
+        self._adaptive_engine = None
 
     def route(self, prompt: str) -> str:
         """Route a prompt to the best model.
+
+        When adaptive routing is enabled, uses ML task detection
+        and model performance tracking before falling back to
+        static scoring.
 
         Args:
             prompt: User prompt
@@ -578,6 +613,8 @@ class ModelRouter:
         """
         if self.mode == "manual":
             model = self.default_model
+        elif self._adaptive_engine is not None:
+            model = self._adaptive_route(prompt)
         else:
             model = route_model(
                 prompt, self.ollama_url, self.default_model, self.mode
@@ -588,6 +625,46 @@ class ModelRouter:
         self._model_usage[model] = self._model_usage.get(model, 0) + 1
 
         return model
+
+    def _adaptive_route(self, prompt: str) -> str:
+        """Route using adaptive engine + static fallback."""
+        engine = self._adaptive_engine
+        task_type, confidence = engine.detect_task_type(prompt)
+
+        # Try adaptive model selection
+        available = get_available_models(self.ollama_url)
+        best_model = engine.get_best_model_for_task(
+            task_type, available, self.default_model
+        )
+
+        if best_model and best_model != self.default_model:
+            console.print(
+                f"[dim]Adaptive: {task_type} "
+                f"({confidence:.0%}) -> {best_model}[/dim]"
+            )
+            return best_model
+
+        # Fall back to static routing
+        return route_model(
+            prompt, self.ollama_url, self.default_model, self.mode
+        )
+
+    def record_outcome(
+        self, prompt: str, model: str, task_type: str, success: bool
+    ) -> None:
+        """Feed outcome data to the adaptive engine.
+
+        Args:
+            prompt: The user prompt
+            model: Model that was used
+            task_type: Detected task type
+            success: Whether the outcome was successful
+        """
+        if self._adaptive_engine is not None:
+            try:
+                self._adaptive_engine.learn(prompt, task_type, model, success)
+            except Exception:
+                pass  # Best effort
 
     def set_mode(self, mode: str):
         """Set routing mode.

@@ -20,6 +20,7 @@ from rich.tree import Tree
 
 from config import PLANS_DIR
 from display import show_streaming, show_thinking, get_verbosity, Verbosity
+from llm_backend import OllamaBackend
 
 console = Console()
 
@@ -105,7 +106,7 @@ def _stream_plan_response(
     label: str = "Planning",
     temperature: float = 0.3,
 ) -> str:
-    """Stream a response from Ollama for planning purposes.
+    """Stream a response from Ollama via OllamaBackend for planning purposes.
 
     Args:
         config: CLI configuration
@@ -117,94 +118,51 @@ def _stream_plan_response(
     Returns:
         Complete response text, or empty string on error
     """
-    url = f"{config.get('ollama_url', 'http://localhost:11434')}/api/chat"
-    payload = {
-        "model": config.get("model", "qwen2.5-coder:14b"),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": True,
-        "options": {
-            "temperature": temperature,
-            "num_ctx": config.get("num_ctx", 32768),
-            "num_predict": config.get("max_tokens", 8192),
-        },
-    }
+    backend = OllamaBackend.from_config(config)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
-    full_response = ""
+    _token_count = [0]
+    _status_ctx = [None]
+
+    if show_streaming():
+        if show_thinking():
+            console.print(f"\n[bold yellow]{label}...[/bold yellow]\n")
+
+        def on_chunk(chunk: str) -> None:
+            print(chunk, end="", flush=True)
+    else:
+        _status_ctx[0] = console.status(
+            f"[bold cyan]{label}[/bold cyan]",
+            spinner="dots12",
+            spinner_style="cyan",
+        )
+        _status_ctx[0].__enter__()
+
+        def on_chunk(chunk: str) -> None:
+            _token_count[0] += 1
+            if _status_ctx[0] is not None:
+                _status_ctx[0].update(
+                    f"[bold cyan]{label}[/bold cyan] "
+                    f"[dim]({_token_count[0]} chunks)[/dim]"
+                )
 
     try:
-        if show_streaming():
-            if show_thinking():
-                console.print(
-                    f"\n[bold yellow]🧠 {label}...[/bold yellow]\n"
-                )
-            with httpx.stream(
-                "POST", url, json=payload, timeout=120.0
-            ) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if line:
-                        data = json.loads(line)
-                        chunk = data.get("message", {}).get("content", "")
-                        if chunk:
-                            full_response += chunk
-                            print(chunk, end="", flush=True)
-                        if data.get("done"):
-                            break
-            print()
-        else:
-            with console.status(
-                f"[bold cyan]{label}[/bold cyan]",
-                spinner="dots12",
-                spinner_style="cyan",
-            ) as status:
-                with httpx.stream(
-                    "POST", url, json=payload, timeout=120.0
-                ) as resp:
-                    resp.raise_for_status()
-                    token_count = 0
-                    for line in resp.iter_lines():
-                        if line:
-                            data = json.loads(line)
-                            chunk = data.get("message", {}).get("content", "")
-                            if chunk:
-                                full_response += chunk
-                                token_count += 1
-                                status.update(
-                                    f"[bold cyan]{label}[/bold cyan] "
-                                    f"[dim]({token_count} chunks)[/dim]"
-                                )
-                            if data.get("done"):
-                                break
+        full_response = backend.stream(
+            messages,
+            temperature=temperature,
+            max_tokens=config.get("max_tokens", 8192),
+            num_ctx=config.get("num_ctx", 32768),
+            on_chunk=on_chunk,
+        )
+    finally:
+        if _status_ctx[0] is not None:
+            _status_ctx[0].__exit__(None, None, None)
 
-    except httpx.ConnectError:
-        console.print(
-            "[red]Error: Cannot connect to Ollama. Is it running?[/red]"
-        )
-        return ""
-    except httpx.ReadTimeout:
-        console.print(
-            "[red]Error: Request timed out. "
-            "Try a simpler project description.[/red]"
-        )
-        return ""
-    except httpx.HTTPStatusError as e:
-        console.print(f"[red]HTTP Error: {e.response.status_code}[/red]")
-        if e.response.status_code == 404:
-            console.print(
-                f"[dim]Model '{config.get('model')}' not found.[/dim]"
-            )
-        return ""
-    except json.JSONDecodeError:
-        console.print(
-            "[red]Error: Invalid response from Ollama.[/red]"
-        )
-        return ""
-    except Exception as e:
-        console.print(f"\n[red]Error: {e}[/red]")
-        return ""
+    if show_streaming():
+        print()
 
     return full_response
 

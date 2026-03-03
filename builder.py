@@ -25,7 +25,8 @@ from diff_editor import (
     parse_edit_blocks, apply_edits, show_diff,
     EDIT_TOOL_DESCRIPTION,
 )
-from chat import diagnose_test_error, format_error_guidance
+from error_diagnosis import diagnose_test_error, format_error_guidance
+from llm_backend import OllamaBackend
 
 from tools import SKIP_DIRS
 
@@ -250,6 +251,30 @@ WEB APP TEST FAILURE RULES:
 
 
 # ── Path Utilities ─────────────────────────────────────────────
+
+def _emit_learning_signal(
+    config: dict,
+    prompt: str,
+    model: str,
+    task_type: str,
+    success: bool,
+) -> None:
+    """Emit a learning signal to the outcome tracker after a build step.
+
+    Best-effort — never blocks the build.
+    """
+    try:
+        from outcome_tracker import OutcomeTracker
+        tracker = OutcomeTracker()
+        tracker.record(
+            task_type=task_type,
+            model=model,
+            outcome="success" if success else "failure",
+            prompt_preview=prompt[:200],
+        )
+    except Exception:
+        pass  # Never block build
+
 
 def normalize_path(filepath: str) -> str:
     if not filepath:
@@ -771,96 +796,50 @@ def _stream_llm_response(
     max_tokens: int = 8192,
     status_label: str = "Generating",
 ) -> str:
-    url = f"{config['ollama_url']}/api/chat"
-    payload = {
-        "model": config["model"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": True,
-        "options": {
-            "temperature": temperature,
-            "num_ctx": config.get("num_ctx", 32768),
-            "num_predict": max_tokens,
-        },
-    }
+    """Stream an LLM response via OllamaBackend."""
+    backend = OllamaBackend.from_config(config)
+    backend._streaming_timeout = 180.0  # Builder needs longer timeout
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
-    full_response = ""
+    _token_count = [0]
+    _status_ctx = [None]
+
+    if _show_streaming():
+        def on_chunk(chunk: str) -> None:
+            print(chunk, end="", flush=True)
+    else:
+        _status_ctx[0] = console.status(
+            f"[bold cyan]{status_label}[/bold cyan]",
+            spinner="dots12",
+            spinner_style="cyan",
+        )
+        _status_ctx[0].__enter__()
+
+        def on_chunk(chunk: str) -> None:
+            _token_count[0] += 1
+            if _status_ctx[0] is not None:
+                _status_ctx[0].update(
+                    f"[bold cyan]{status_label}[/bold cyan] "
+                    f"[dim]({_token_count[0]} chunks)[/dim]"
+                )
 
     try:
-        if _show_streaming():
-            with httpx.stream(
-                "POST", url, json=payload, timeout=180.0
-            ) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if line:
-                        data = json.loads(line)
-                        chunk = data.get("message", {}).get(
-                            "content", ""
-                        )
-                        if chunk:
-                            full_response += chunk
-                            print(chunk, end="", flush=True)
-                        if data.get("done"):
-                            break
-            print()
-        else:
-            with console.status(
-                f"[bold cyan]{status_label}[/bold cyan]",
-                spinner="dots12",
-                spinner_style="cyan",
-            ) as status:
-                with httpx.stream(
-                    "POST", url, json=payload, timeout=180.0
-                ) as resp:
-                    resp.raise_for_status()
-                    token_count = 0
-                    for line in resp.iter_lines():
-                        if line:
-                            data = json.loads(line)
-                            chunk = data.get(
-                                "message", {}
-                            ).get("content", "")
-                            if chunk:
-                                full_response += chunk
-                                token_count += 1
-                                status.update(
-                                    f"[bold cyan]"
-                                    f"{status_label}"
-                                    f"[/bold cyan] "
-                                    f"[dim]({token_count} "
-                                    f"chunks)[/dim]"
-                                )
-                            if data.get("done"):
-                                break
-    except httpx.ConnectError:
-        console.print(
-            "\n[red]Cannot connect to Ollama. "
-            "Is it running?[/red]"
+        full_response = backend.stream(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            num_ctx=config.get("num_ctx", 32768),
+            on_chunk=on_chunk,
         )
-        return ""
-    except httpx.ReadTimeout:
-        console.print(
-            "\n[red]Request timed out. "
-            "Try a smaller model or /compact.[/red]"
-        )
-        return ""
-    except httpx.HTTPStatusError as e:
-        console.print(
-            f"\n[red]HTTP Error: "
-            f"{e.response.status_code}[/red]"
-        )
-        if e.response.status_code == 404:
-            console.print(
-                f"[dim]Model '{config['model']}' "
-                f"not found.[/dim]"
-            )
-        return ""
-    except Exception as e:
-        console.print(f"\n[red]Error: {e}[/red]")
-        return ""
+    finally:
+        if _status_ctx[0] is not None:
+            _status_ctx[0].__exit__(None, None, None)
+
+    if _show_streaming():
+        print()
 
     return full_response
 
@@ -2618,6 +2597,15 @@ def build_plan(
                 f"[yellow]⚠ Git commit failed: "
                 f"{e}[/yellow]"
             )
+
+        # Emit learning signal for completed step
+        _emit_learning_signal(
+            config,
+            prompt=step.get("title", f"Step {step_id}"),
+            model=config.get("model", ""),
+            task_type="code_generation",
+            success=True,
+        )
 
         if validate_every_step:
             project_info = detect_project_type(

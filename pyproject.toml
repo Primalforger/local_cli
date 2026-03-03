@@ -13,6 +13,8 @@ dependencies = [
     "rich>=13.0",
     "prompt_toolkit>=3.0",
     "pyyaml>=6.0",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +29,8 @@ ai = "cli:main"
 
 [tool.setuptools]
 py-modules = [
+    "adaptive_engine",
+    "adaptive_seed",
     "aiignore",
     "builder",
     "chat",
@@ -36,18 +40,23 @@ py-modules = [
     "context_manager",
     "diff_editor",
     "display",
+    "error_diagnosis",
     "file_utils",
     "git_integration",
+    "llm_backend",
     "logging_util",
     "memory",
     "metrics",
     "model_router",
+    "outcome_tracker",
     "planner",
     "project_context",
     "project_reviewer",
+    "prompt_optimizer",
     "prompts",
     "session_manager",
     "templates",
+    "tool_registry",
     "tools",
     "undo",
     "watch_mode",

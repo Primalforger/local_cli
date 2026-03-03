@@ -3427,3 +3427,39 @@ TOOL_MAP = {
     # Scaffolding
     "scaffold": tool_scaffold,
 }
+
+
+# ── ToolRegistry Integration ──────────────────────────────────
+# Register all tools via ToolRegistry for MOSA compliance.
+# TOOL_MAP remains as backwards-compatible alias.
+
+def _init_registry():
+    """Register all existing tools in the ToolRegistry."""
+    try:
+        from tool_registry import get_registry
+        registry = get_registry()
+        for name, fn in TOOL_MAP.items():
+            read_only = name in _READ_ONLY_TOOLS
+            registry.register_function(name, fn, read_only=read_only)
+
+        # Load external plugins if directory exists
+        try:
+            from config import CONFIG_DIR
+            plugin_dir = CONFIG_DIR / "plugins"
+            if plugin_dir.is_dir():
+                loaded = registry.load_plugin_dir(plugin_dir)
+                if loaded:
+                    console.print(f"[dim]Loaded {loaded} plugin tool(s)[/dim]")
+                    # Sync new plugins back to TOOL_MAP
+                    for pname in registry.names():
+                        if pname not in TOOL_MAP:
+                            tool = registry.get(pname)
+                            if tool is not None:
+                                TOOL_MAP[pname] = tool.execute
+        except ImportError:
+            pass
+    except ImportError:
+        pass  # tool_registry not available, TOOL_MAP still works
+
+
+_init_registry()

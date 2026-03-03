@@ -52,6 +52,24 @@ def save_session(
     filename = f"{name}_{timestamp}.json"
     path = SESSIONS_DIR / filename
 
+    # Extract task metadata from messages (purely additive)
+    task_types_used = set()
+    tool_names_used = set()
+    try:
+        from model_router import detect_task_type
+        for msg in messages:
+            if msg.get("role") == "user" and not msg["content"].startswith("[SYSTEM:"):
+                tt = detect_task_type(msg["content"])
+                if tt != "general":
+                    task_types_used.add(tt)
+            if msg.get("role") == "user" and msg["content"].startswith("Tool results:"):
+                # Extract tool names from tool result markers
+                import re
+                for m in re.finditer(r'\[Tool: (\w+)\]', msg["content"]):
+                    tool_names_used.add(m.group(1))
+    except ImportError:
+        pass
+
     session_data = {
         "name": name,
         "timestamp": timestamp,
@@ -59,6 +77,8 @@ def save_session(
         "cwd": os.getcwd(),
         "message_count": len(messages),
         "messages": messages,
+        "task_types_used": sorted(task_types_used),
+        "tool_names_used": sorted(tool_names_used),
     }
     atomic_write(path, json.dumps(session_data, indent=2))
     console.print(f"[green]Session saved: {path.name}[/green]")

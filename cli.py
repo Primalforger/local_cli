@@ -894,6 +894,13 @@ def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
     elif command == "/fix-fences":
         _handle_fix_fences(arg)
 
+    # ── Adaptive Learning ──────────────────────────────────────
+    elif command == "/adaptive":
+        _handle_adaptive(arg, session, config)
+
+    elif command == "/feedback":
+        _handle_feedback(arg, session)
+
     # ── Help ───────────────────────────────────────────────────
     elif command == "/help":
         _show_help()
@@ -1156,6 +1163,194 @@ def _handle_fix_fences(arg: str):
         )
 
 
+# ── Adaptive Learning Commands ─────────────────────────────────
+
+def _handle_adaptive(arg: str, session, config: dict):
+    """Handle /adaptive on|off|stats|reset|train command."""
+    sub = arg.strip().lower() if arg else ""
+
+    if sub == "on":
+        try:
+            from adaptive_engine import AdaptiveEngine
+            from adaptive_seed import seed_engine
+
+            _ensure_session_attrs(session)
+            if session._router is None:
+                from model_router import ModelRouter
+                session._router = ModelRouter(
+                    config.get("ollama_url", "http://localhost:11434"),
+                    config.get("model", "qwen2.5-coder:14b"),
+                )
+            session._router.enable_adaptive(
+                min_samples=config.get("adaptive_routing_min_samples", 20),
+                alpha=config.get("learning_rate", 1.0),
+            )
+
+            engine = session._router._adaptive_engine
+            if engine and engine._total_samples == 0:
+                count = seed_engine(engine)
+                console.print(
+                    f"[green]Adaptive routing enabled. "
+                    f"Seeded with {count} examples.[/green]"
+                )
+            else:
+                console.print(
+                    f"[green]Adaptive routing enabled. "
+                    f"{engine._total_samples} samples loaded.[/green]"
+                )
+
+            config["adaptive_routing"] = True
+        except ImportError as e:
+            console.print(
+                f"[red]Cannot enable adaptive routing: {e}[/red]\n"
+                "[dim]Install scikit-learn: pip install scikit-learn[/dim]"
+            )
+
+    elif sub == "off":
+        _ensure_session_attrs(session)
+        if session._router:
+            session._router.disable_adaptive()
+        config["adaptive_routing"] = False
+        console.print("[yellow]Adaptive routing disabled.[/yellow]")
+
+    elif sub == "stats":
+        _ensure_session_attrs(session)
+        if (
+            session._router
+            and session._router._adaptive_engine is not None
+        ):
+            from rich.table import Table
+            stats = session._router._adaptive_engine.get_stats()
+            console.print(
+                f"\n[bold]Adaptive Engine Stats[/bold]\n"
+                f"  Total samples: {stats['total_samples']}\n"
+                f"  Classifier trained: {stats['is_trained']}\n"
+                f"  sklearn available: {stats['sklearn_available']}\n"
+                f"  Min samples for ML: {stats['min_samples']}\n"
+                f"  Last trained: {stats['last_trained'] or 'never'}\n"
+            )
+
+            perf = stats.get("model_performance", {})
+            if perf:
+                table = Table(
+                    title="Model Performance by Task Type",
+                    border_style="dim",
+                )
+                table.add_column("Task Type", style="cyan")
+                table.add_column("Model", style="green")
+                table.add_column("Success", justify="center")
+                table.add_column("Total", justify="center")
+                table.add_column("Rate", justify="center")
+
+                for task_type, models in sorted(perf.items()):
+                    for model, s in sorted(models.items()):
+                        total = s.get("total", 0)
+                        success = s.get("success", 0)
+                        rate = success / total if total > 0 else 0
+                        rate_color = (
+                            "green" if rate >= 0.7
+                            else "yellow" if rate >= 0.4
+                            else "red"
+                        )
+                        table.add_row(
+                            task_type, model,
+                            str(success), str(total),
+                            f"[{rate_color}]{rate:.0%}[/]",
+                        )
+                console.print(table)
+            else:
+                console.print("[dim]No performance data yet.[/dim]")
+        else:
+            console.print(
+                "[dim]Adaptive routing not enabled. "
+                "Use /adaptive on[/dim]"
+            )
+
+    elif sub == "reset":
+        _ensure_session_attrs(session)
+        if (
+            session._router
+            and session._router._adaptive_engine is not None
+        ):
+            session._router._adaptive_engine.reset()
+            console.print(
+                "[yellow]Adaptive model data cleared.[/yellow]"
+            )
+        else:
+            console.print("[dim]No adaptive data to reset.[/dim]")
+
+    elif sub == "train":
+        _ensure_session_attrs(session)
+        if (
+            session._router
+            and session._router._adaptive_engine is not None
+        ):
+            success = session._router._adaptive_engine.force_retrain()
+            if success:
+                console.print(
+                    "[green]Forced retrain complete.[/green]"
+                )
+            else:
+                console.print(
+                    "[yellow]Not enough data to train "
+                    "(need at least 2 task types).[/yellow]"
+                )
+        else:
+            console.print(
+                "[dim]Adaptive routing not enabled. "
+                "Use /adaptive on[/dim]"
+            )
+    else:
+        console.print(
+            "[bold]Usage:[/bold] /adaptive "
+            "<on|off|stats|reset|train>\n"
+            "[dim]  on    — Enable adaptive ML routing\n"
+            "  off   — Disable, fall back to keyword routing\n"
+            "  stats — Show learned model performance\n"
+            "  reset — Clear all adaptive data\n"
+            "  train — Force retrain from outcomes[/dim]"
+        )
+
+
+def _handle_feedback(arg: str, session):
+    """Handle /feedback good|bad command."""
+    feedback = arg.strip().lower() if arg else ""
+
+    if feedback not in ("good", "bad"):
+        console.print(
+            "[bold]Usage:[/bold] /feedback <good|bad>\n"
+            "[dim]Rate the last response to improve "
+            "adaptive routing.[/dim]"
+        )
+        return
+
+    _ensure_session_attrs(session)
+
+    # Record in outcome tracker
+    updated = False
+    if hasattr(session, "_outcome_tracker") and session._outcome_tracker:
+        updated = session._outcome_tracker.record_feedback(feedback)
+
+    # Record in adaptive engine via router
+    if (
+        session._router
+        and session._router._adaptive_engine is not None
+        and hasattr(session, "_current_task_type")
+    ):
+        session._router.record_outcome(
+            prompt="",
+            model=session.config.get("model", ""),
+            task_type=session._current_task_type,
+            success=(feedback == "good"),
+        )
+
+    if updated or feedback:
+        emoji = "+" if feedback == "good" else "-"
+        console.print(
+            f"[green]Feedback recorded: [{emoji}] {feedback}[/green]"
+        )
+
+
 # ── Help Text ──────────────────────────────────────────────────
 
 def _show_help():
@@ -1255,6 +1450,17 @@ def _show_help():
 | `/auto all` | YOLO mode — auto-apply everything |
 | `/auto fixes` | Only auto-apply error fixes |
 | `/auto safe` | Reset to manual confirmations |
+
+## Adaptive Learning
+| Command | Description |
+|---|---|
+| `/adaptive on` | Enable ML-based model routing |
+| `/adaptive off` | Disable adaptive routing |
+| `/adaptive stats` | Show learned model performance |
+| `/adaptive reset` | Clear adaptive data |
+| `/adaptive train` | Force retrain from outcomes |
+| `/feedback good` | Rate last response positively |
+| `/feedback bad` | Rate last response negatively |
 
 ## Display
 | Command | Description |

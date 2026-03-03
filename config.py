@@ -51,6 +51,13 @@ DEFAULT_CONFIG = {
     "auto_apply_fixes": False,    # Auto-apply error fixes (no confirmation)
     "auto_run_commands": False,   # Auto-run shell commands (DANGEROUS)
     "confirm_destructive": True,  # Always confirm deletes/overwrites > 50 lines
+
+    # ML adaptive learning settings
+    "adaptive_routing": False,                # Enable ML-based model routing
+    "adaptive_routing_min_samples": 20,       # Min outcomes before ML activates
+    "memory_relevance_scoring": True,         # TF-IDF memory retrieval vs recency
+    "learning_rate": 1.0,                     # Naive Bayes smoothing alpha
+    "outcome_feedback_mode": "auto",          # "auto" / "explicit" / "off"
 }
 
 # ── Config value validation ────────────────────────────────────
@@ -75,24 +82,32 @@ _CONFIG_VALIDATORS = {
     "auto_run_commands": lambda v: isinstance(v, bool),
     "confirm_destructive": lambda v: isinstance(v, bool),
     "system_prompt": lambda v: isinstance(v, str) and len(v) > 0,
+    "adaptive_routing": lambda v: isinstance(v, bool),
+    "adaptive_routing_min_samples": lambda v: isinstance(v, int) and 5 <= v <= 1000,
+    "memory_relevance_scoring": lambda v: isinstance(v, bool),
+    "learning_rate": lambda v: isinstance(v, (int, float)) and 0.01 <= v <= 10.0,
+    "outcome_feedback_mode": lambda v: v in ("auto", "explicit", "off"),
 }
 
 # Config values that should be parsed as booleans
 _BOOL_KEYS = {
     "auto_apply", "auto_apply_fixes", "auto_run_commands",
     "confirm_destructive",
+    "adaptive_routing", "memory_relevance_scoring",
 }
 
 # Config values that should be parsed as integers
 _INT_KEYS = {
     "num_ctx", "max_tokens", "max_fix_attempts",
     "streaming_timeout", "max_retries", "undo_max_history", "preview_max_bytes",
+    "adaptive_routing_min_samples",
 }
 
 # Config values that should be parsed as floats
 _FLOAT_KEYS = {
     "temperature",
     "context_warn_threshold", "context_compact_threshold", "context_force_threshold",
+    "learning_rate",
 }
 
 # ── Paths ──────────────────────────────────────────────────────
@@ -121,6 +136,8 @@ PLANS_DIR = CONFIG_DIR / "plans"
 SESSIONS_DIR = CONFIG_DIR / "sessions"
 METRICS_FILE = CONFIG_DIR / "metrics.json"
 MEMORY_DIR = CONFIG_DIR / "memory"
+ADAPTIVE_MODEL_FILE = CONFIG_DIR / "adaptive_model.json"
+OUTCOMES_FILE = CONFIG_DIR / "outcomes.json"
 
 
 # ── Directory Management ──────────────────────────────────────

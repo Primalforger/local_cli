@@ -1,13 +1,27 @@
 """Display control — manage verbosity levels across the entire CLI."""
 
 from enum import IntEnum
-from typing import Optional, Union
+from typing import Optional, Protocol, Union, runtime_checkable
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
+
+
+# ── Display Provider Protocol (MOSA interface) ────────────────
+
+@runtime_checkable
+class DisplayProvider(Protocol):
+    """Protocol for display providers — allows swapping UI implementations."""
+
+    def show_thinking(self) -> bool: ...
+    def show_streaming(self) -> bool: ...
+    def show_metrics(self) -> bool: ...
+    def show_tool_output(self) -> bool: ...
+    def show_previews(self) -> bool: ...
+    def show_diffs(self) -> bool: ...
 
 
 # ── Verbosity Levels ───────────────────────────────────────────

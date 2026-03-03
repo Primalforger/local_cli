@@ -25,6 +25,12 @@ class RequestMetrics:
     duration_seconds: float = 0.0
     tokens_per_second: float = 0.0
     success: bool = True
+    tool_calls_made: list[str] = field(default_factory=list)
+    tool_call_count: int = 0
+    fix_attempt: int = 0
+    session_id: str = ""
+    prompt_length: int = 0
+    response_length: int = 0
 
 
 class MetricsTracker:
@@ -42,7 +48,16 @@ class MetricsTracker:
         self._token_count += 1
 
     def end_request(
-        self, model: str, prompt_tokens: int = 0, task_type: str = "chat"
+        self,
+        model: str,
+        prompt_tokens: int = 0,
+        task_type: str = "chat",
+        tool_calls: list[str] | None = None,
+        fix_attempt: int = 0,
+        session_id: str = "",
+        success: bool = True,
+        prompt_length: int = 0,
+        response_length: int = 0,
     ) -> RequestMetrics:
         from display import show_metrics as _show_metrics
 
@@ -58,18 +73,52 @@ class MetricsTracker:
             total_tokens=prompt_tokens + self._token_count,
             duration_seconds=round(duration, 2),
             tokens_per_second=round(tps, 1),
-            success=True,
+            success=success,
+            tool_calls_made=tool_calls or [],
+            tool_call_count=len(tool_calls) if tool_calls else 0,
+            fix_attempt=fix_attempt,
+            session_id=session_id,
+            prompt_length=prompt_length,
+            response_length=response_length,
         )
         self.history.append(m)
         self.save()
 
         if _show_metrics():
             console.print(
-                f"[dim]  ⏱ {duration:.1f}s │ {self._token_count} tokens │ "
-                f"{tps:.1f} tok/s │ {model}[/dim]"
+                f"[dim]  {duration:.1f}s | {self._token_count} tokens | "
+                f"{tps:.1f} tok/s | {model}[/dim]"
             )
 
         return m
+
+    def get_model_task_performance(self) -> dict[str, dict[str, float]]:
+        """Get success rates per model per task type for ML training.
+
+        Returns:
+            {task_type: {model: success_rate}}
+        """
+        from collections import defaultdict
+
+        task_model_stats: dict[str, dict[str, dict[str, int]]] = defaultdict(
+            lambda: defaultdict(lambda: {"success": 0, "total": 0})
+        )
+
+        for m in self.history:
+            if m.task_type and m.model:
+                stats = task_model_stats[m.task_type][m.model]
+                stats["total"] += 1
+                if m.success:
+                    stats["success"] += 1
+
+        result: dict[str, dict[str, float]] = {}
+        for task_type, models in task_model_stats.items():
+            result[task_type] = {}
+            for model, stats in models.items():
+                if stats["total"] > 0:
+                    result[task_type][model] = stats["success"] / stats["total"]
+
+        return result
 
     def show_stats(self, last_n: int = 50):
         recent = self.history[-last_n:]

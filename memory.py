@@ -330,17 +330,85 @@ def remove_entry(
     )
 
 
+# ── Relevance Scoring ─────────────────────────────────────────
+
+def score_memory_entry(entry_text: str, query: str) -> float:
+    """Score a memory entry's relevance to a query using TF-IDF-inspired token overlap.
+
+    Args:
+        entry_text: The memory entry text
+        query: The current task/query text
+
+    Returns:
+        Relevance score (higher = more relevant). 0.0 if no overlap.
+    """
+    if not entry_text or not query:
+        return 0.0
+
+    # Tokenize both texts (simple word-level)
+    import re
+    _stop_words = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "shall", "can", "to", "of", "in", "for",
+        "on", "with", "at", "by", "from", "as", "into", "through", "during",
+        "before", "after", "above", "below", "between", "and", "but", "or",
+        "not", "no", "so", "if", "then", "than", "too", "very", "just",
+        "about", "up", "out", "it", "its", "this", "that", "these", "those",
+        "i", "you", "he", "she", "we", "they", "me", "him", "her", "us",
+    }
+
+    def tokenize(text: str) -> list[str]:
+        words = re.findall(r'\b[a-z_][a-z0-9_]{1,}\b', text.lower())
+        return [w for w in words if w not in _stop_words]
+
+    entry_tokens = tokenize(entry_text)
+    query_tokens = set(tokenize(query))
+
+    if not entry_tokens or not query_tokens:
+        return 0.0
+
+    # Count matching tokens with position weighting (earlier matches = better)
+    score = 0.0
+    entry_set = set(entry_tokens)
+    overlap = entry_set & query_tokens
+
+    for token in overlap:
+        # Longer tokens are more specific = higher weight
+        weight = len(token) / 5.0
+        score += weight
+
+    # Normalize by entry length to avoid biasing toward longer entries
+    score = score / (len(entry_tokens) ** 0.5) if entry_tokens else 0.0
+
+    return round(score, 4)
+
+
 # ── Context for LLM ───────────────────────────────────────────
 
-def get_memory_context(project_dir: Optional[Path] = None) -> str:
+def get_memory_context(
+    project_dir: Optional[Path] = None,
+    current_task: str = "",
+    use_relevance: bool = True,
+) -> str:
     """Build a context string from memory for the LLM.
 
-    Returns a markdown-formatted string with the most relevant
-    memory items, sized to not overwhelm the context window.
+    When current_task is provided and use_relevance is True, scores
+    all entries against the task and returns the top-10 most relevant.
+    Falls back to recency-based selection otherwise.
+
+    Args:
+        project_dir: Project directory (default: cwd)
+        current_task: Current task/prompt for relevance scoring
+        use_relevance: Whether to use relevance scoring (vs recency)
+
+    Returns:
+        Markdown-formatted string with the most relevant memory items.
     """
     memory = load_memory(project_dir)
     sections = []
 
+    # Preferences always included (they're project-wide)
     if memory.get("preferences"):
         prefs = memory["preferences"]
         if prefs:
@@ -348,36 +416,58 @@ def get_memory_context(project_dir: Optional[Path] = None) -> str:
             for key, value in prefs.items():
                 sections.append(f"- {key}: {value}")
 
-    if memory.get("decisions"):
-        decisions = memory["decisions"]
-        if decisions:
-            # Show last 10 decisions
-            recent = decisions[-10:]
-            sections.append("\n## Architectural Decisions")
-            for d in recent:
-                desc = d.get("description", "")
-                if desc:
-                    sections.append(f"- {desc}")
+    # Collect all scoreable entries
+    all_entries: list[tuple[str, str, float]] = []  # (category, text, score)
 
-    if memory.get("patterns"):
-        patterns = memory["patterns"]
-        if patterns:
-            recent = patterns[-10:]
-            sections.append("\n## Coding Patterns & Conventions")
-            for p in recent:
-                desc = p.get("description", "")
-                if desc:
-                    sections.append(f"- {desc}")
+    for d in memory.get("decisions", []):
+        desc = d.get("description", "")
+        if desc:
+            all_entries.append(("decision", desc, 0.0))
 
-    if memory.get("notes"):
-        notes = memory["notes"]
-        if notes:
-            recent = notes[-5:]
-            sections.append("\n## Notes")
-            for n in recent:
-                content = n.get("content", "")
-                if content:
-                    sections.append(f"- {content}")
+    for p in memory.get("patterns", []):
+        desc = p.get("description", "")
+        if desc:
+            all_entries.append(("pattern", desc, 0.0))
+
+    for n in memory.get("notes", []):
+        content = n.get("content", "")
+        if content:
+            all_entries.append(("note", content, 0.0))
+
+    if not all_entries:
+        return "\n".join(sections) if sections else ""
+
+    # Score and sort
+    if current_task and use_relevance:
+        scored = [
+            (cat, text, score_memory_entry(text, current_task))
+            for cat, text, _ in all_entries
+        ]
+        scored.sort(key=lambda x: x[2], reverse=True)
+        selected = scored[:10]
+    else:
+        # Recency: last 10 decisions, last 10 patterns, last 5 notes
+        selected = all_entries[-25:]  # Rough recency
+
+    # Group selected entries by category
+    decisions = [text for cat, text, _ in selected if cat == "decision"]
+    patterns = [text for cat, text, _ in selected if cat == "pattern"]
+    notes = [text for cat, text, _ in selected if cat == "note"]
+
+    if decisions:
+        sections.append("\n## Architectural Decisions")
+        for desc in decisions[:10]:
+            sections.append(f"- {desc}")
+
+    if patterns:
+        sections.append("\n## Coding Patterns & Conventions")
+        for desc in patterns[:10]:
+            sections.append(f"- {desc}")
+
+    if notes:
+        sections.append("\n## Notes")
+        for content in notes[:5]:
+            sections.append(f"- {content}")
 
     return "\n".join(sections) if sections else ""
 

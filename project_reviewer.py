@@ -15,6 +15,7 @@ from project_context import (
     scan_project, build_context_summary, build_file_map,
     display_project_scan,
 )
+from llm_backend import OllamaBackend
 
 console = Console()
 
@@ -195,7 +196,7 @@ def _stream_and_collect(
     temperature: float = 0.3,
     expect_json: bool = False,
 ) -> str:
-    """Stream from Ollama with appropriate display mode.
+    """Stream from Ollama via OllamaBackend with appropriate display mode.
 
     Args:
         config: CLI configuration dict
@@ -208,102 +209,56 @@ def _stream_and_collect(
     Returns:
         Complete response text, or empty string on error
     """
-    url = f"{config.get('ollama_url', 'http://localhost:11434')}/api/chat"
-    payload = {
-        "model": config.get("model", "qwen2.5-coder:14b"),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": True,
-        "options": {
-            "temperature": temperature,
-            "num_ctx": config.get("num_ctx", 32768),
-            "num_predict": config.get("max_tokens", 4096),
-        },
-    }
+    backend = OllamaBackend.from_config(config)
+    backend._streaming_timeout = 180.0  # Reviewer needs longer timeout
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
-    full_response = ""
     verbose, Verbosity = _get_verbosity()
+    _token_count = [0]
+    _status_ctx = [None]
+
+    if expect_json or verbose == Verbosity.QUIET:
+        # Spinner mode — don't show raw JSON streaming
+        _status_ctx[0] = console.status(
+            f"[bold cyan]{label}[/bold cyan]",
+            spinner="dots12",
+            spinner_style="cyan",
+        )
+        _status_ctx[0].__enter__()
+
+        def on_chunk(chunk: str) -> None:
+            _token_count[0] += 1
+            if _status_ctx[0] is not None:
+                _status_ctx[0].update(
+                    f"[bold cyan]{label}[/bold cyan] "
+                    f"[dim]({_token_count[0]} chunks)[/dim]"
+                )
+    else:
+        # Stream text for markdown responses
+        if _show_thinking():
+            console.print(f"\n[bold yellow]{label}...[/bold yellow]\n")
+
+        def on_chunk(chunk: str) -> None:
+            if _show_streaming():
+                print(chunk, end="", flush=True)
 
     try:
-        if expect_json or verbose == Verbosity.QUIET:
-            # Spinner mode — don't show raw JSON streaming
-            with console.status(
-                f"[bold cyan]{label}[/bold cyan]",
-                spinner="dots12",
-                spinner_style="cyan",
-            ) as status:
-                with httpx.stream(
-                    "POST", url, json=payload, timeout=180.0
-                ) as resp:
-                    resp.raise_for_status()
-                    token_count = 0
-                    for line in resp.iter_lines():
-                        if line:
-                            data = json.loads(line)
-                            chunk = data.get("message", {}).get(
-                                "content", ""
-                            )
-                            if chunk:
-                                full_response += chunk
-                                token_count += 1
-                                status.update(
-                                    f"[bold cyan]{label}[/bold cyan] "
-                                    f"[dim]({token_count} chunks)[/dim]"
-                                )
-                            if data.get("done"):
-                                break
-        else:
-            # Stream text for markdown responses
-            if _show_thinking():
-                console.print(
-                    f"\n[bold yellow]🧠 {label}...[/bold yellow]\n"
-                )
-            with httpx.stream(
-                "POST", url, json=payload, timeout=180.0
-            ) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if line:
-                        data = json.loads(line)
-                        chunk = data.get("message", {}).get("content", "")
-                        if chunk:
-                            full_response += chunk
-                            if _show_streaming():
-                                print(chunk, end="", flush=True)
-                        if data.get("done"):
-                            break
-            print()
+        full_response = backend.stream(
+            messages,
+            temperature=temperature,
+            max_tokens=config.get("max_tokens", 4096),
+            num_ctx=config.get("num_ctx", 32768),
+            on_chunk=on_chunk,
+        )
+    finally:
+        if _status_ctx[0] is not None:
+            _status_ctx[0].__exit__(None, None, None)
 
-    except httpx.ConnectError:
-        console.print(
-            "[red]Error: Cannot connect to Ollama. Is it running?[/red]"
-        )
-        return ""
-    except httpx.ReadTimeout:
-        console.print(
-            "[red]Error: Request timed out. "
-            "Try a smaller project or model.[/red]"
-        )
-        return ""
-    except httpx.HTTPStatusError as e:
-        console.print(
-            f"[red]HTTP Error: {e.response.status_code}[/red]"
-        )
-        if e.response.status_code == 404:
-            console.print(
-                f"[dim]Model '{config.get('model')}' not found.[/dim]"
-            )
-        return ""
-    except json.JSONDecodeError:
-        console.print(
-            "[red]Error: Invalid response from Ollama.[/red]"
-        )
-        return ""
-    except Exception as e:
-        console.print(f"\n[red]Error: {e}[/red]")
-        return ""
+    if not (expect_json or verbose == Verbosity.QUIET):
+        print()
 
     return full_response
 

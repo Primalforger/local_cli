@@ -13,6 +13,10 @@ from context_manager import (
     ContextBudget, smart_compact, condense_file_contents,
     estimate_message_tokens,
 )
+from error_diagnosis import (
+    diagnose_test_error, format_error_guidance, _is_test_failure,
+)
+from llm_backend import OllamaBackend
 
 from metrics import MetricsTracker
 
@@ -62,446 +66,10 @@ def _get_verbosity():
         return 1, None
 
 
-# ── Error Diagnosis ────────────────────────────────────────────
-
-def diagnose_test_error(error_output: str) -> dict:
-    """
-    Parse test/build error output and produce a structured diagnosis.
-    Returns dict with error type, root cause, affected files, and fix guidance.
-    """
-    diagnosis = {
-        "error_type": "unknown",
-        "root_cause": "",
-        "affected_files": [],
-        "missing_module": "",
-        "import_chain": [],
-        "fix_guidance": "",
-        "is_local_import": False,
-        "is_pip_package": False,
-    }
-
-    # ── Extract the actual error line (last line of traceback) ──
-    lines = error_output.strip().split("\n")
-    error_line = ""
-    for line in reversed(lines):
-        stripped = line.strip()
-        if stripped.startswith(("ModuleNotFoundError:", "ImportError:",
-                                "SyntaxError:", "IndentationError:",
-                                "NameError:", "AttributeError:",
-                                "ConnectionRefusedError:")):
-            error_line = stripped
-            break
-
-    if not error_line:
-        # Check for non-exception error patterns before giving up
-        # ── Shared file state (accumulated tasks.json / data file between tests) ──
-        additional_match = re.search(
-            r'First list contains (\d+) additional elements', error_output
-        )
-        if additional_match or "First extra element" in error_output:
-            count = additional_match.group(1) if additional_match else "multiple"
-            diagnosis["error_type"] = "shared_file_state"
-            diagnosis["root_cause"] = (
-                f"Tests are loading stale data from a persistent file (e.g. tasks.json). "
-                f"The list has {count} extra elements left over from previous test runs. "
-                f"Each test instantiates the class and it loads ALL prior data from disk."
-            )
-            diagnosis["fix_guidance"] = (
-                "1. Add data_file=None support to the class __init__:\n"
-                "     def __init__(self, data_file='tasks.json'):\n"
-                "         self.data_file = data_file\n"
-                "         self.tasks = []\n"
-                "         if data_file: self.load_tasks()\n"
-                "2. In every test, use setUp():\n"
-                "     def setUp(self):\n"
-                "         self.manager = TodoManager(data_file=None)\n"
-                "3. In tearDown(), delete any leftover data files:\n"
-                "     def tearDown(self):\n"
-                "         if os.path.exists('tasks.json'): os.remove('tasks.json')\n"
-                "4. Delete the existing tasks.json from the project root right now.\n"
-                "DO NOT change test assertions — fix the class and test setup instead."
-            )
-            return diagnosis
-
-        # ── ConnectionRefusedError (can appear without traceback) ──
-        if "ConnectionRefusedError" in error_output or "Connection refused" in error_output:
-            diagnosis["error_type"] = "connection_refused"
-            diagnosis["root_cause"] = (
-                "Test is connecting to a real server that isn't running. "
-                "Unit/integration tests must use the framework's test client, not real HTTP."
-            )
-            diagnosis["fix_guidance"] = (
-                "Replace all requests.get/post('http://localhost:...') with:\n"
-                "  Flask: client = app.test_client(); client.get('/route')\n"
-                "  FastAPI: client = TestClient(app); client.get('/route')\n"
-                "Remove any app.run() or server.listen() calls from test files."
-            )
-            return diagnosis
-
-        # ── IntegrityError / UniqueViolation ──
-        if any(p in error_output for p in (
-            "IntegrityError", "UniqueViolation", "UNIQUE constraint failed",
-            "duplicate key value violates", "NOT NULL constraint failed",
-        )):
-            diagnosis["error_type"] = "db_integrity_error"
-            diagnosis["root_cause"] = (
-                "Tests are sharing database state. A prior test left rows that violate "
-                "a UNIQUE or NOT NULL constraint in the next test."
-            )
-            diagnosis["fix_guidance"] = (
-                "Add to setUp():  db.drop_all(); db.create_all()\n"
-                "Add to tearDown(): db.session.remove(); db.drop_all()\n"
-                "Use 'sqlite:///:memory:' as the test DB URI.\n"
-                "For Django, use django.test.TestCase (auto-rollback per test)."
-            )
-            return diagnosis
-
-        # ── OperationalError: no such table ──
-        if any(p in error_output for p in (
-            "no such table", "relation does not exist", "Table doesn't exist",
-        )):
-            diagnosis["error_type"] = "db_table_missing"
-            diagnosis["root_cause"] = (
-                "Test database tables were never created. "
-                "db.create_all() must run inside the app context before any test."
-            )
-            diagnosis["fix_guidance"] = (
-                "In setUp(), after setting the test DB URI:\n"
-                "  with app.app_context():\n"
-                "      db.create_all()\n"
-                "For FastAPI/SQLModel: SQLModel.metadata.create_all(engine)\n"
-                "Ensure this runs BEFORE any test method that touches the DB."
-            )
-            return diagnosis
-
-        # ── Missing env var (KeyError on os.environ) ──
-        env_key_match = re.search(
-            r"KeyError: ['\"]([A-Z_]{3,})['\"]", error_output
-        )
-        if env_key_match and any(p in error_output for p in (
-            "os.environ", "os.getenv", "environ[", "getenv("
-        )):
-            missing_key = env_key_match.group(1)
-            diagnosis["error_type"] = "missing_env_var"
-            diagnosis["missing_module"] = missing_key
-            diagnosis["root_cause"] = (
-                f"Environment variable '{missing_key}' is not set in the test environment."
-            )
-            diagnosis["fix_guidance"] = (
-                f"In setUp() or conftest.py, set a safe test default:\n"
-                f"  os.environ['{missing_key}'] = 'test_value'\n"
-                f"Or use: @unittest.mock.patch.dict(os.environ, {{'{missing_key}': 'test'}})\n"
-                f"Never rely on a real .env file being present during automated tests."
-            )
-            return diagnosis
-
-        return diagnosis
-
-    # ── ModuleNotFoundError ──
-    mod_match = re.search(
-        r"ModuleNotFoundError: No module named ['\"](.+?)['\"]",
-        error_line,
-    )
-    if mod_match:
-        missing = mod_match.group(1)
-        diagnosis["error_type"] = "missing_module"
-        diagnosis["missing_module"] = missing
-
-        # Extract the import chain from traceback
-        file_pattern = re.compile(
-            r'(?:File "(.+?)".*line (\d+))|(?:^(\S+\.py):(\d+):)',
-            re.MULTILINE,
-        )
-        for m in file_pattern.finditer(error_output):
-            fpath = m.group(1) or m.group(3)
-            lineno = m.group(2) or m.group(4)
-            if fpath and not fpath.startswith(("C:\\Python", "/usr/lib",
-                                               "<", "importlib")):
-                diagnosis["import_chain"].append(f"{fpath}:{lineno}")
-                if fpath not in diagnosis["affected_files"]:
-                    diagnosis["affected_files"].append(fpath)
-
-        # ── Key decision: is this a LOCAL module or a pip package? ──
-        top_level = missing.split(".")[0]
-
-        # Check if it looks like a local module
-        from pathlib import Path
-        cwd = Path.cwd()
-        local_indicators = [
-            (cwd / f"{top_level}.py").is_file(),
-            (cwd / top_level).is_dir(),
-            (cwd / "src" / f"{top_level}.py").is_file(),
-            (cwd / "src" / top_level).is_dir(),
-            (cwd / "lib" / f"{top_level}.py").is_file(),
-            (cwd / "app" / f"{top_level}.py").is_file(),
-            top_level in ("models", "crawler", "app", "config",
-                          "utils", "helpers", "views", "routes",
-                          "schemas", "services", "database", "db",
-                          "api", "core", "common", "settings",
-                          "urls", "forms", "serializers", "tasks",
-                          "middleware", "decorators", "exceptions",
-                          "constants", "enums", "managers"),
-        ]
-
-        if any(local_indicators):
-            diagnosis["is_local_import"] = True
-            diagnosis["is_pip_package"] = False
-            diagnosis["root_cause"] = (
-                f"Module '{missing}' exists as a local file but Python "
-                f"can't find it. This is an IMPORT PATH issue, not a "
-                f"missing pip package."
-            )
-
-            # Figure out the specific fix needed
-            src_file = cwd / "src" / f"{top_level}.py"
-            src_dir = cwd / "src" / top_level
-            bare_file = cwd / f"{top_level}.py"
-            bare_dir = cwd / top_level
-
-            if ((src_file.is_file() or src_dir.is_dir())
-                    and not bare_file.is_file()
-                    and not bare_dir.is_dir()):
-                diagnosis["fix_guidance"] = (
-                    f"The file exists at 'src/{top_level}.py' but is being "
-                    f"imported as '{missing}' (without the 'src.' prefix). "
-                    f"FIXES (choose one):\n"
-                    f"  1. Change the import in the IMPORTING file to "
-                    f"'from src.{missing} import ...' — this is the best fix\n"
-                    f"  2. Add a conftest.py that adds 'src' to sys.path\n"
-                    f"  3. Add 'src' to sys.path at the top of the importing file\n"
-                    f"DO NOT add '{missing}' to requirements.txt — "
-                    f"it is NOT a pip package.\n"
-                    f"DO NOT modify requirements.txt at all for this error."
-                )
-            elif bare_file.is_file() or bare_dir.is_dir():
-                diagnosis["fix_guidance"] = (
-                    f"The file '{top_level}.py' exists in the project root "
-                    f"but Python can't find it. The importing file may be "
-                    f"running from a different directory. Check:\n"
-                    f"  1. Is there a sys.path issue?\n"
-                    f"  2. Does conftest.py add the project root to sys.path?\n"
-                    f"  3. Does the project need a setup.py or pyproject.toml "
-                    f"with package configuration?\n"
-                    f"DO NOT add '{missing}' to requirements.txt."
-                )
-            else:
-                diagnosis["fix_guidance"] = (
-                    f"Module '{missing}' looks like a local module name but "
-                    f"the file wasn't found. Check:\n"
-                    f"  1. Does the file need to be created?\n"
-                    f"  2. Is the import path/spelling wrong?\n"
-                    f"  3. Search the project for files that might match.\n"
-                    f"DO NOT add '{missing}' to requirements.txt unless you "
-                    f"are CERTAIN it's a third-party package listed on PyPI."
-                )
-        else:
-            diagnosis["is_local_import"] = False
-            diagnosis["is_pip_package"] = True
-            diagnosis["root_cause"] = (
-                f"Module '{missing}' appears to be a third-party package "
-                f"that's not installed."
-            )
-            diagnosis["fix_guidance"] = (
-                f"Add '{missing}' to requirements.txt with an appropriate "
-                f"version pin, then reinstall dependencies."
-            )
-
-        return diagnosis
-
-    # ── ImportError: cannot import name ──
-    name_match = re.search(
-        r"ImportError: cannot import name ['\"](.+?)['\"] from ['\"](.+?)['\"]",
-        error_line,
-    )
-    if name_match:
-        symbol = name_match.group(1)
-        module = name_match.group(2)
-        diagnosis["error_type"] = "missing_symbol"
-        diagnosis["missing_module"] = module
-        diagnosis["root_cause"] = (
-            f"Module '{module}' exists but doesn't export '{symbol}'. "
-            f"This could be a version mismatch (the symbol was added in "
-            f"a newer version or removed in the current one), or the "
-            f"symbol name is misspelled, or it's defined in a different "
-            f"submodule."
-        )
-        diagnosis["fix_guidance"] = (
-            f"1. Use read_file to check the actual source of '{module}' "
-            f"and see what it exports\n"
-            f"2. Check what version of '{module}' provides '{symbol}'\n"
-            f"3. Update the version in requirements.txt if needed\n"
-            f"4. Or fix the import if the symbol name is wrong\n"
-            f"5. If '{module}' is a local file, read it and check what "
-            f"names are defined in it"
-        )
-
-        # Check if the module is local
-        from pathlib import Path
-        cwd = Path.cwd()
-        top_level = module.split(".")[0]
-        if ((cwd / f"{top_level}.py").is_file()
-                or (cwd / "src" / f"{top_level}.py").is_file()):
-            diagnosis["is_local_import"] = True
-            diagnosis["fix_guidance"] += (
-                f"\n\nThis appears to be a LOCAL module. Read the file "
-                f"to check what's actually defined in it before changing "
-                f"requirements.txt."
-            )
-
-        return diagnosis
-
-    # ── SyntaxError ──
-    if "SyntaxError" in error_line:
-        diagnosis["error_type"] = "syntax_error"
-        for line in lines:
-            if 'File "' in line and '.py"' in line:
-                fmatch = re.search(r'File "(.+?)".*line (\d+)', line)
-                if fmatch:
-                    diagnosis["affected_files"].append(fmatch.group(1))
-        diagnosis["root_cause"] = f"Syntax error in source file: {error_line}"
-        diagnosis["fix_guidance"] = (
-            "Read the file mentioned in the traceback and fix the syntax "
-            "error. Use read_file to see the actual file content.\n"
-            "Do NOT modify requirements.txt for syntax errors."
-        )
-        return diagnosis
-
-    # ── IndentationError ──
-    if "IndentationError" in error_line:
-        diagnosis["error_type"] = "indentation_error"
-        for line in lines:
-            if 'File "' in line and '.py"' in line:
-                fmatch = re.search(r'File "(.+?)".*line (\d+)', line)
-                if fmatch:
-                    diagnosis["affected_files"].append(fmatch.group(1))
-        diagnosis["root_cause"] = f"Indentation error: {error_line}"
-        diagnosis["fix_guidance"] = (
-            "Read the file and fix the indentation. "
-            "Do NOT modify requirements.txt for indentation errors."
-        )
-        return diagnosis
-
-    # ── AttributeError ──
-    attr_match = re.search(
-        r"AttributeError: (?:module |type object )?['\"]?(.+?)['\"]? has no attribute ['\"](.+?)['\"]",
-        error_line,
-    )
-    if attr_match:
-        obj = attr_match.group(1)
-        attr = attr_match.group(2)
-        diagnosis["error_type"] = "attribute_error"
-        diagnosis["root_cause"] = (
-            f"'{obj}' doesn't have attribute '{attr}'. This is usually "
-            f"a version mismatch or API change."
-        )
-        diagnosis["fix_guidance"] = (
-            f"1. Check which version of the package provides '{attr}'\n"
-            f"2. Read the source file to see what's available\n"
-            f"3. Update the version in requirements.txt if it's a "
-            f"third-party package version issue"
-        )
-        return diagnosis
-
-    # ── ConnectionRefusedError (from error_line) ──
-    if "ConnectionRefusedError" in error_line or "Connection refused" in error_line:
-        diagnosis["error_type"] = "connection_refused"
-        diagnosis["root_cause"] = (
-            "Test is connecting to a real server that isn't running. "
-            "Unit/integration tests must use the framework's test client, not real HTTP."
-        )
-        diagnosis["fix_guidance"] = (
-            "Replace all requests.get/post('http://localhost:...') with:\n"
-            "  Flask: client = app.test_client(); client.get('/route')\n"
-            "  FastAPI: client = TestClient(app); client.get('/route')\n"
-            "Remove any app.run() or server.listen() calls from test files."
-        )
-        return diagnosis
-
-    return diagnosis
-
-
-def format_error_guidance(result_text: str) -> str:
-    """
-    Analyze test failure output and append smart, specific guidance
-    so the LLM knows exactly what to fix instead of guessing.
-    """
-    diagnosis = diagnose_test_error(result_text)
-
-    if diagnosis["error_type"] == "unknown":
-        return (
-            "\n\n" + "=" * 60 + "\n"
-            "⚠ IMPORTANT: The output above contains the FULL error traceback.\n"
-            "Read the LAST line of each traceback first — it has the actual error.\n"
-            "Then trace back through the file paths to find which file to fix.\n"
-            "Do NOT guess. Do NOT add random packages to requirements.txt.\n"
-            "Use read_file to examine the files mentioned in the traceback.\n"
-            + "=" * 60
-        )
-
-    parts = ["\n\n" + "=" * 60]
-    parts.append("⚠ ERROR DIAGNOSIS (auto-generated — read carefully)")
-    parts.append("=" * 60)
-    parts.append(f"\nError type: {diagnosis['error_type']}")
-
-    if diagnosis["missing_module"]:
-        parts.append(f"Missing module: {diagnosis['missing_module']}")
-
-    parts.append(f"\nRoot cause: {diagnosis['root_cause']}")
-
-    if diagnosis["affected_files"]:
-        parts.append("\nAffected files (read these with read_file):")
-        for f in diagnosis["affected_files"]:
-            parts.append(f"  → {f}")
-
-    if diagnosis["import_chain"]:
-        parts.append("\nImport chain (how we got to the error):")
-        for step in diagnosis["import_chain"]:
-            parts.append(f"  → {step}")
-
-    parts.append(f"\n🔧 HOW TO FIX:\n{diagnosis['fix_guidance']}")
-
-    if diagnosis["is_local_import"]:
-        parts.append(
-            "\n" + "!" * 60 + "\n"
-            "🚫 CRITICAL: This is a LOCAL module, NOT a pip package.\n"
-            "Do NOT modify requirements.txt.\n"
-            "Do NOT add this module name to requirements.txt.\n"
-            "Fix the IMPORT PATH in the Python source file instead.\n"
-            "Use read_file to examine the affected files listed above.\n"
-            + "!" * 60
-        )
-
-    if diagnosis["error_type"] == "syntax_error":
-        parts.append(
-            "\n🚫 CRITICAL: This is a syntax error in YOUR code.\n"
-            "Do NOT modify requirements.txt. Read and fix the file."
-        )
-
-    if diagnosis["error_type"] == "indentation_error":
-        parts.append(
-            "\n🚫 CRITICAL: This is an indentation error in YOUR code.\n"
-            "Do NOT modify requirements.txt. Read and fix the file."
-        )
-
-    parts.append("=" * 60)
-
-    return "\n".join(parts)
-
-
-# ── Test Failure Detection ─────────────────────────────────────
-
-def _is_test_failure(result_text: str) -> bool:
-    """Detect if tool results contain a test/build failure."""
-    failure_indicators = [
-        "FAILED", "ERRORS", "exit 2", "exit 1",
-        "ImportError", "ModuleNotFoundError",
-        "SyntaxError", "IndentationError",
-        "cannot import name", "No module named",
-        "error during collection", "collection error",
-        "ModuleNotFoundError:", "ImportError:",
-        "FAILED (errors=", "ERROR collecting",
-    ]
-    return any(indicator in result_text for indicator in failure_indicators)
+# ── Error Diagnosis (delegated to error_diagnosis.py) ─────────
+# diagnose_test_error, format_error_guidance, _is_test_failure
+# are imported from error_diagnosis module above.
+# Re-export for backwards compatibility.
 
 
 # ── Tool Call Parsing ──────────────────────────────────────────
@@ -892,154 +460,59 @@ def _is_tool_read_only(tool_name: str, tool_args: str = "") -> bool:
 # ── Stream Response ────────────────────────────────────────────
 
 def stream_response(messages: list[dict], config: dict) -> str:
-    """Stream a response from Ollama with retry logic."""
-    url = f"{config['ollama_url']}/api/chat"
-    payload = {
-        "model": config["model"],
-        "messages": messages,
-        "stream": True,
-        "options": {
-            "temperature": config.get("temperature", 0.7),
-            "num_ctx": config.get("num_ctx", 32768),
-            "num_predict": config.get("max_tokens", 4096),
-        },
-    }
+    """Stream a response from Ollama via the OllamaBackend.
 
-    full_response = ""
-    max_retries = config.get("max_retries", 2)
-    streaming_timeout = config.get("streaming_timeout", 120)
+    Delegates to the consolidated backend while preserving the original
+    display behavior (streaming vs spinner) and metrics tracking.
+    """
+    backend = OllamaBackend.from_config(config)
     tracker.start_request()
 
-    for retry in range(max_retries + 1):
-        if retry > 0:
-            import time
-            backoff = min(2 ** retry, 16)
-            console.print(f"[dim]Waiting {backoff}s before retry...[/dim]")
-            time.sleep(backoff)
-        try:
-            if _show_streaming():
-                with httpx.stream(
-                    "POST", url, json=payload, timeout=float(streaming_timeout)
-                ) as resp:
-                    resp.raise_for_status()
-                    for line in resp.iter_lines():
-                        if line:
-                            data = json.loads(line)
-                            chunk = data.get("message", {}).get("content", "")
-                            if chunk:
-                                full_response += chunk
-                                tracker.count_token()
-                                print(chunk, end="", flush=True)
-                            if data.get("done"):
-                                break
-            else:
-                with console.status(
-                    "[bold cyan]Thinking[/bold cyan]",
-                    spinner="dots12",
-                    spinner_style="cyan",
-                ) as status:
-                    with httpx.stream(
-                        "POST", url, json=payload, timeout=float(streaming_timeout)
-                    ) as resp:
-                        resp.raise_for_status()
-                        for line in resp.iter_lines():
-                            if line:
-                                data = json.loads(line)
-                                chunk = data.get("message", {}).get("content", "")
-                                if chunk:
-                                    full_response += chunk
-                                    tracker.count_token()
-                                    word_count = len(full_response.split())
-                                    status.update(
-                                        f"[bold cyan]Thinking[/bold cyan] "
-                                        f"[dim]({word_count} words)[/dim]"
-                                    )
-                                if data.get("done"):
-                                    break
-                if full_response.strip():
-                    console.print(full_response)
+    # Build chunk callback based on display mode
+    _word_count = [0]
+    _full = [""]
+    _status_ctx = [None]
 
-            print()
-            break
+    if _show_streaming():
+        def on_chunk(chunk: str) -> None:
+            tracker.count_token()
+            print(chunk, end="", flush=True)
+    else:
+        # Use spinner mode — accumulate silently, show at end
+        _status_ctx[0] = console.status(
+            "[bold cyan]Thinking[/bold cyan]",
+            spinner="dots12",
+            spinner_style="cyan",
+        )
+        _status_ctx[0].__enter__()
 
-        except httpx.ConnectError:
-            if retry < max_retries:
-                console.print(
-                    f"\n[yellow]Cannot connect to Ollama. "
-                    f"Retrying ({retry + 1}/{max_retries})...[/yellow]"
+        def on_chunk(chunk: str) -> None:
+            tracker.count_token()
+            _full[0] += chunk
+            _word_count[0] = len(_full[0].split())
+            if _status_ctx[0] is not None:
+                _status_ctx[0].update(
+                    f"[bold cyan]Thinking[/bold cyan] "
+                    f"[dim]({_word_count[0]} words)[/dim]"
                 )
-                full_response = ""
-                continue
-            console.print(
-                "\n[red]Error: Cannot connect to Ollama. "
-                "Is it running?[/red]"
-            )
-            console.print("[dim]Start it with: ollama serve[/dim]")
-            return ""
 
-        except httpx.ReadTimeout:
-            if retry < max_retries:
-                console.print(
-                    f"\n[yellow]⚠ Timed out. "
-                    f"Retrying ({retry + 1}/{max_retries})...[/yellow]"
-                )
-                if len(messages) > 5:
-                    console.print(
-                        "[dim]Trimming context for retry...[/dim]"
-                    )
-                    payload["messages"] = (
-                        [messages[0]] + messages[-4:]
-                    )
-                full_response = ""
-                continue
-            console.print(
-                "\n[red]Timed out after retries. "
-                "Try /compact or a smaller model.[/red]"
-            )
-            return ""
+    try:
+        full_response = backend.stream(
+            messages,
+            temperature=config.get("temperature", 0.7),
+            max_tokens=config.get("max_tokens", 4096),
+            num_ctx=config.get("num_ctx", 32768),
+            on_chunk=on_chunk,
+        )
+    finally:
+        if _status_ctx[0] is not None:
+            _status_ctx[0].__exit__(None, None, None)
 
-        except httpx.RemoteProtocolError:
-            console.print(
-                "\n[red]Ollama disconnected — may be out of VRAM.[/red]"
-            )
-            console.print("[dim]Try: /model qwen2.5-coder:7b[/dim]")
-            return ""
+    if not _show_streaming() and full_response.strip():
+        console.print(full_response)
 
-        except httpx.HTTPStatusError as e:
-            console.print(
-                f"\n[red]HTTP Error: {e.response.status_code}[/red]"
-            )
-            if e.response.status_code == 404 and retry < max_retries:
-                try:
-                    from model_router import ensure_model_available
-                    new_model = ensure_model_available(
-                        config["model"], config["ollama_url"]
-                    )
-                    if new_model != config["model"]:
-                        config["model"] = new_model
-                        payload["model"] = new_model
-                        full_response = ""
-                        continue
-                except Exception:
-                    pass
-                console.print(
-                    f"[dim]Model '{config['model']}' not found. "
-                    f"Try: /models to see available models[/dim]"
-                )
-            return ""
-
-        except json.JSONDecodeError:
-            console.print(
-                "\n[red]Error: Invalid response from Ollama.[/red]"
-            )
-            console.print(
-                "[dim]Ollama may be overloaded. Try again.[/dim]"
-            )
-            return ""
-
-        except Exception as e:
-            console.print(f"\n[red]Error: {e}[/red]")
-            return ""
+    if _show_streaming():
+        print()
 
     if full_response and _show_metrics():
         prompt_tokens = estimate_message_tokens(messages)
@@ -1053,6 +526,7 @@ def stream_response(messages: list[dict], config: dict) -> str:
 class ChatSession:
     def __init__(self, config: dict):
         self.config = config
+        self._backend = OllamaBackend.from_config(config)
         self._current_plan = None
         self._router = None
         self._undo = None
@@ -1072,6 +546,18 @@ class ChatSession:
         self._warned_context = False
         self._hallucination_retries = 0
         self._max_hallucination_retries = 2
+
+        # ML instrumentation
+        import uuid
+        self._session_id = str(uuid.uuid4())[:8]
+        self._current_task_type = "chat"
+        self._tool_calls_this_turn: list[str] = []
+        self._outcome_tracker = None
+        try:
+            from outcome_tracker import OutcomeTracker
+            self._outcome_tracker = OutcomeTracker()
+        except ImportError:
+            pass
 
         # Load project memory
         memory_context = ""
@@ -1308,6 +794,14 @@ class ChatSession:
         # Context management — before adding new message
         self._manage_context()
 
+        # Detect task type for ML instrumentation
+        try:
+            from model_router import detect_task_type
+            self._current_task_type = detect_task_type(user_input)
+        except ImportError:
+            self._current_task_type = "chat"
+        self._tool_calls_this_turn = []
+
         # Route model if enabled
         if self._router and self._router.mode != "manual":
             self.config["model"] = self._router.route(user_input)
@@ -1361,6 +855,10 @@ class ChatSession:
             result_text, has_read_only, has_write = (
                 self._execute_tools(tool_calls)
             )
+            # Track tool calls for ML instrumentation
+            self._tool_calls_this_turn.extend(
+                name for name, _ in tool_calls
+            )
 
             # Validate imports after file writes
             if has_write:
@@ -1392,6 +890,24 @@ class ChatSession:
 
         self._hallucination_retries = 0
         self._show_context_usage()
+
+        # Record outcome for adaptive learning
+        if (
+            self._outcome_tracker is not None
+            and self.config.get("outcome_feedback_mode", "auto") == "auto"
+            and response
+        ):
+            try:
+                self._outcome_tracker.record(
+                    session_id=self._session_id,
+                    task_type=self._current_task_type,
+                    model=self.config.get("model", ""),
+                    outcome="success" if response else "failure",
+                    tool_sequence=self._tool_calls_this_turn,
+                    prompt_preview=user_input[:200],
+                )
+            except Exception:
+                pass  # Best effort — never block chat
 
         return response
 
