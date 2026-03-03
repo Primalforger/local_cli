@@ -17,6 +17,7 @@ A powerful command-line coding assistant that runs entirely on your machine usin
 - **Session persistence** — save, load, search, and branch conversations
 - **Project memory** — remembers architectural decisions, patterns, and preferences across sessions
 - **MCP server** — expose tools via Model Context Protocol for Claude Desktop and other clients
+- **MCP client** — connect to any external MCP server (stdio or SSE) and use its tools from within the CLI
 - **Undo/redo** — conversation snapshots with named branches
 - **Clipboard support** — paste code in, copy responses out
 - **Cross-platform** — Windows, macOS, Linux
@@ -115,7 +116,7 @@ local_cli/
 │   ├── model_router.py       #   Task detection, model selection
 │   └── prompts.py            #   Built-in + custom prompt templates
 │
-├── tools/                    # Tool implementations (13 modules)
+├── tools/                    # Tool implementations (17 modules)
 │   ├── file_ops.py           #   read, write, edit, copy, diff, hash
 │   ├── directory_ops.py      #   list, tree, find, mkdir
 │   ├── search.py             #   grep, search-replace
@@ -126,7 +127,14 @@ local_cli/
 │   ├── package.py            #   pip/npm install, dependency listing
 │   ├── archive.py            #   Create/extract archives
 │   ├── env.py                #   Environment variables, venv
-│   └── scaffold.py           #   Project scaffolding
+│   ├── scaffold.py           #   Project scaffolding
+│   ├── database.py           #   SQLite queries, schema inspection
+│   ├── docker.py             #   Docker build, run, compose
+│   ├── testing.py            #   Test runners, coverage
+│   ├── lint.py               #   Linting, formatting, type checks
+│   ├── dotenv.py             #   .env file management
+│   ├── json_tools.py         #   JSON/YAML queries, validation
+│   └── mcp_client.py         #   Connect to external MCP servers
 │
 ├── adaptive/                 # ML-based learning system
 │   ├── adaptive_engine.py    #   Task classifier (sklearn / fallback)
@@ -145,9 +153,10 @@ local_cli/
 │   ├── watch_mode.py         #   File change monitoring
 │   ├── metrics.py            #   Performance tracking (tok/s, timing)
 │   ├── logging_util.py       #   Centralized logging setup
-│   └── tool_registry.py      #   MOSA-compliant tool plugin system
+│   ├── tool_registry.py      #   MOSA-compliant tool plugin system
+│   └── mcp_registry.py       #   MCP server registration (mcp_servers.json)
 │
-├── tests/                    # 303 tests (pytest)
+├── tests/                    # 368 tests (pytest)
 ├── *.py (root shims)         # Backwards-compat re-exports
 ├── pyproject.toml
 └── CLAUDE.md
@@ -227,6 +236,14 @@ local_cli/
 | `/retry` | Re-generate last response |
 | `/branch <name>` | Save conversation branch |
 | `/switch <name>` | Switch to branch |
+
+### MCP (External Tool Servers)
+| Command | Description |
+|---|---|
+| `/mcp list` | Show registered MCP servers |
+| `/mcp add <name>` | Interactively register a new MCP server |
+| `/mcp remove <name>` | Remove a registered server |
+| `/mcp test <name>` | Connect and list available tools |
 
 ### Clipboard & Utilities
 | Command | Description |
@@ -342,20 +359,68 @@ Claude Desktop config (`claude_desktop_config.json`):
 
 Install the optional MCP dependency: `pip install -e ".[mcp]"`
 
+## MCP Client
+
+Connect to **any** external MCP server (stdio or SSE) and use its tools directly from within the CLI. Servers are registered in `mcp_servers.json` in your config directory.
+
+### Register a server
+
+Use the interactive command:
+
+```
+/mcp add github
+```
+
+Or edit `~/.config/localcli/mcp_servers.json` directly:
+
+```json
+{
+  "servers": {
+    "github": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {"GITHUB_TOKEN": "ghp_..."},
+      "description": "GitHub API via MCP"
+    },
+    "remote-api": {
+      "transport": "sse",
+      "url": "http://localhost:8080/sse",
+      "headers": {"Authorization": "Bearer ..."},
+      "description": "Remote API server"
+    }
+  }
+}
+```
+
+### Use from chat
+
+The LLM can discover and call remote tools automatically:
+
+```
+<tool:mcp_list></tool>                                        — list registered servers
+<tool:mcp_list>github</tool>                                  — list tools on a server
+<tool:mcp_call>github|list_repos|{"owner": "octocat"}</tool>  — call a remote tool
+<tool:mcp_resources>github</tool>                             — list resources
+<tool:mcp_disconnect>github</tool>                            — disconnect
+```
+
+Install the optional MCP dependency: `pip install -e ".[mcp]"`
+
 ## Development
 
 ```bash
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests (303 tests)
+# Run tests (368 tests)
 pytest tests/ -v
 
 # Lint (requires ruff)
 ruff check .
 ```
 
-The test suite covers config validation, token estimation, path security, diff editing, error diagnosis, command sandboxing, secret scanning, tool registry plugins, project memory, adaptive engine, prompt optimization, and file ignore patterns.
+The test suite covers config validation, token estimation, path security, diff editing, error diagnosis, command sandboxing, secret scanning, tool registry plugins, project memory, adaptive engine, prompt optimization, file ignore patterns, and MCP client/registry.
 
 ### Project layout
 
@@ -379,7 +444,7 @@ Source code lives in five sub-packages (`core/`, `planning/`, `llm/`, `adaptive/
 | [pytest](https://docs.pytest.org/) | Test framework |
 | [pytest-cov](https://pytest-cov.readthedocs.io/) | Coverage reporting |
 | [ruff](https://docs.astral.sh/ruff/) | Fast Python linter |
-| [mcp](https://pypi.org/project/mcp/) | Model Context Protocol server (optional) |
+| [mcp](https://pypi.org/project/mcp/) | Model Context Protocol server & client (optional) |
 
 ## License
 

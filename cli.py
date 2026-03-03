@@ -771,6 +771,142 @@ def cmd_stats(ctx: CommandContext):
     t.show_stats()
 
 
+# ── MCP Servers ────────────────────────────────────────────────
+
+@command("/mcp", description="Manage MCP servers", category="Tools")
+def cmd_mcp(ctx: CommandContext):
+    from utils.mcp_registry import MCPRegistry
+
+    registry = MCPRegistry()
+    subcmd = ctx.arg.split(maxsplit=1)
+    sub = subcmd[0] if subcmd else "list"
+    sub_arg = subcmd[1].strip() if len(subcmd) > 1 else ""
+
+    if sub == "list":
+        servers = registry.list_servers()
+        if not servers:
+            ctx.console.print(
+                "[dim]No MCP servers registered. "
+                "Use /mcp add <name> to register one.[/dim]"
+            )
+            return
+        ctx.console.print("\n[bold]Registered MCP Servers:[/bold]\n")
+        for name, cfg in servers.items():
+            transport = cfg.get("transport", "?")
+            desc = cfg.get("description", "")
+            ctx.console.print(f"  [cyan]{name}[/cyan] ({transport})")
+            if desc:
+                ctx.console.print(f"    [dim]{desc}[/dim]")
+        ctx.console.print()
+
+    elif sub == "add":
+        if not sub_arg:
+            ctx.console.print(
+                "[yellow]Usage: /mcp add <name>[/yellow]"
+            )
+            return
+        name = sub_arg.strip()
+        try:
+            transport = ctx.console.input(
+                "[bold]Transport (stdio/sse): [/bold]"
+            ).strip().lower()
+            if transport not in ("stdio", "sse"):
+                ctx.console.print(
+                    "[red]Invalid transport. Must be stdio or sse.[/red]"
+                )
+                return
+
+            config: dict = {"transport": transport}
+
+            if transport == "stdio":
+                cmd = ctx.console.input(
+                    "[bold]Command (e.g. npx, python): [/bold]"
+                ).strip()
+                if not cmd:
+                    ctx.console.print("[red]Command is required.[/red]")
+                    return
+                config["command"] = cmd
+                args_str = ctx.console.input(
+                    "[bold]Args (space-separated, or empty): [/bold]"
+                ).strip()
+                if args_str:
+                    config["args"] = args_str.split()
+            else:
+                url = ctx.console.input(
+                    "[bold]URL (e.g. http://localhost:8080/sse): [/bold]"
+                ).strip()
+                if not url:
+                    ctx.console.print("[red]URL is required.[/red]")
+                    return
+                config["url"] = url
+                headers_str = ctx.console.input(
+                    "[bold]Headers (key:value, or empty): [/bold]"
+                ).strip()
+                if headers_str:
+                    config["headers"] = {}
+                    for pair in headers_str.split(","):
+                        if ":" in pair:
+                            k, v = pair.split(":", maxsplit=1)
+                            config["headers"][k.strip()] = v.strip()
+
+            env_str = ctx.console.input(
+                "[bold]Env vars (KEY=VAL, comma-separated, or empty): [/bold]"
+            ).strip()
+            if env_str:
+                config["env"] = {}
+                for pair in env_str.split(","):
+                    if "=" in pair:
+                        k, v = pair.split("=", maxsplit=1)
+                        config["env"][k.strip()] = v.strip()
+
+            desc = ctx.console.input(
+                "[bold]Description (optional): [/bold]"
+            ).strip()
+            if desc:
+                config["description"] = desc
+
+            registry.add_server(name, config)
+            ctx.console.print(
+                f"[green]Server '{name}' registered.[/green]"
+            )
+        except (EOFError, KeyboardInterrupt):
+            ctx.console.print("\n[dim]Cancelled.[/dim]")
+        except ValueError as e:
+            ctx.console.print(f"[red]{e}[/red]")
+
+    elif sub == "remove":
+        if not sub_arg:
+            ctx.console.print(
+                "[yellow]Usage: /mcp remove <name>[/yellow]"
+            )
+            return
+        if registry.remove_server(sub_arg):
+            ctx.console.print(
+                f"[green]Server '{sub_arg}' removed.[/green]"
+            )
+        else:
+            ctx.console.print(
+                f"[red]Server '{sub_arg}' not found.[/red]"
+            )
+
+    elif sub == "test":
+        if not sub_arg:
+            ctx.console.print(
+                "[yellow]Usage: /mcp test <name>[/yellow]"
+            )
+            return
+        from tools.mcp_client import tool_mcp_list
+        ctx.console.print(f"[dim]Connecting to '{sub_arg}'...[/dim]")
+        result = tool_mcp_list(sub_arg)
+        ctx.console.print(result)
+
+    else:
+        ctx.console.print(
+            "[yellow]MCP commands: list, add <name>, "
+            "remove <name>, test <name>[/yellow]"
+        )
+
+
 # ── Project Review & Improve ───────────────────────────────────
 
 @command("/review-project", description="Full project review", category="Review")

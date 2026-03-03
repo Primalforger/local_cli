@@ -88,6 +88,10 @@ _SUBMODULE_TOOLS: dict[str, list[str]] = {
     "tools.json_tools": [
         "tool_json_query", "tool_json_validate", "tool_yaml_to_json",
     ],
+    "tools.mcp_client": [
+        "tool_mcp_list", "tool_mcp_call",
+        "tool_mcp_resources", "tool_mcp_disconnect",
+    ],
 }
 
 # Canonical tool name -> function name (strip "tool_" prefix for the map key)

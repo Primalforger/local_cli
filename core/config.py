@@ -157,6 +157,7 @@ METRICS_FILE = CONFIG_DIR / "metrics.json"
 MEMORY_DIR = CONFIG_DIR / "memory"
 ADAPTIVE_MODEL_FILE = CONFIG_DIR / "adaptive_model.json"
 OUTCOMES_FILE = CONFIG_DIR / "outcomes.json"
+MCP_SERVERS_FILE = CONFIG_DIR / "mcp_servers.json"
 
 
 # ── Directory Management ──────────────────────────────────────

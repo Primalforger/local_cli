@@ -59,6 +59,8 @@ _READ_ONLY_TOOLS = {
     "json_query",
     "json_validate",
     "yaml_to_json",
+    "mcp_list",
+    "mcp_resources",
 }
 
 
@@ -413,6 +415,15 @@ JSON / YAML:
 
 TEMPLATING:
 <tool:scaffold>type|name</tool>
+
+MCP (REMOTE TOOL SERVERS):
+<tool:mcp_list></tool>                                    — show all registered servers
+<tool:mcp_list>server_name</tool>                         — list tools available on a server
+<tool:mcp_call>server_name|tool_name|{"arg": "value"}</tool> — call a tool on a remote MCP server
+<tool:mcp_resources>server_name</tool>                    — list resources on a server
+<tool:mcp_resources>server_name|resource://uri</tool>     — read a resource
+<tool:mcp_disconnect>server_name</tool>                   — disconnect from a server
+<tool:mcp_disconnect></tool>                              — disconnect all
 
 RULES:
 1. ALWAYS include the closing </tool> tag

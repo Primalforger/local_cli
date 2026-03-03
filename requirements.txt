@@ -2,3 +2,8 @@ httpx
 rich
 prompt_toolkit
 pyyaml
+scikit-learn
+joblib
+
+# Optional: MCP support (server and client)
+# mcp[cli]>=1.0
