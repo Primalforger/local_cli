@@ -8,19 +8,17 @@ Local AI CLI — a feature-rich command-line coding assistant powered by Ollama 
 
 ## Setup & Running
 
+Python is provided by **Anaconda** at `C:\ProgramData\anaconda3\python.exe`. Use this interpreter for all commands.
+
 ```bash
-# Setup (Windows PowerShell) — creates venv, installs deps, pulls default model, sets 'ai' alias
-./setup.ps1
-
-# Manual setup
-python -m venv .venv && source .venv/Scripts/activate  # Windows bash
-pip install -e .
-
 # Run
-python cli.py
+/c/ProgramData/anaconda3/python.exe cli.py
 
 # Run tests
-pytest tests/ -v
+/c/ProgramData/anaconda3/python.exe -m pytest tests/ -v
+
+# Install in editable mode
+/c/ProgramData/anaconda3/python.exe -m pip install -e .
 ```
 
 ## Architecture
