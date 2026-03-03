@@ -309,6 +309,362 @@ venv
 node_modules
 ''',
     },
+    "go-api": {
+        "main.go": '''package main
+
+import (
+	"log"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+func main() {
+	r := gin.Default()
+
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	api := r.Group("/api")
+	{
+		api.GET("/", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"message": "Hello World"})
+		})
+	}
+
+	log.Println("Server starting on :8080")
+	if err := r.Run(":8080"); err != nil {
+		log.Fatal(err)
+	}
+}
+''',
+        "go.mod": '''module myproject
+
+go 1.22
+
+require github.com/gin-gonic/gin v1.9.1
+''',
+        "handlers/health.go": '''package handlers
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+func HealthCheck(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok",
+	})
+}
+''',
+        ".gitignore": '''# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test
+*.test
+*.out
+
+# Dependency
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+''',
+    },
+    "express-ts": {
+        "package.json": '''{
+  "name": "my-api",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "tsx": "^4.0.0",
+    "typescript": "^5.3.0"
+  }
+}
+''',
+        "tsconfig.json": '''{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "lib": ["ES2022"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
+''',
+        "src/index.ts": '''import express from "express";
+import cors from "cors";
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(cors());
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.json({ message: "Hello World" });
+});
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", uptime: process.uptime() });
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
+''',
+        ".gitignore": '''node_modules/
+dist/
+.env
+*.js.map
+''',
+    },
+    "django": {
+        "manage.py": '''#!/usr/bin/env python
+"""Django management script."""
+import os
+import sys
+
+
+def main():
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
+    try:
+        from django.core.management import execute_from_command_line
+    except ImportError as exc:
+        raise ImportError(
+            "Couldn't import Django. Are you sure it's installed?"
+        ) from exc
+    execute_from_command_line(sys.argv)
+
+
+if __name__ == "__main__":
+    main()
+''',
+        "myproject/__init__.py": '',
+        "myproject/settings.py": '''"""Django settings."""
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+SECRET_KEY = "django-insecure-change-me-in-production"
+DEBUG = True
+ALLOWED_HOSTS = ["*"]
+
+INSTALLED_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+]
+
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+]
+
+ROOT_URLCONF = "myproject.urls"
+
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.debug",
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
+}
+
+STATIC_URL = "static/"
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+''',
+        "myproject/urls.py": '''"""URL configuration."""
+from django.contrib import admin
+from django.urls import path
+from django.http import JsonResponse
+
+
+def health(request):
+    return JsonResponse({"status": "ok"})
+
+
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("health/", health),
+]
+''',
+        "myproject/wsgi.py": '''"""WSGI config."""
+import os
+from django.core.wsgi import get_wsgi_application
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
+application = get_wsgi_application()
+''',
+        "requirements.txt": "django>=5.0\n",
+    },
+    "vue": {
+        "package.json": '''{
+  "name": "my-vue-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "vite": "^5.0.0"
+  }
+}
+''',
+        "vite.config.js": '''import { defineConfig } from "vite";
+import vue from "@vitejs/plugin-vue";
+
+export default defineConfig({
+  plugins: [vue()],
+  server: { port: 3000 },
+});
+''',
+        "index.html": '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vue App</title>
+</head>
+<body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
+''',
+        "src/main.js": '''import { createApp } from "vue";
+import App from "./App.vue";
+import "./style.css";
+
+createApp(App).mount("#app");
+''',
+        "src/App.vue": '''<script setup>
+import { ref } from "vue";
+
+const count = ref(0);
+</script>
+
+<template>
+  <div class="app">
+    <h1>Vue App</h1>
+    <button @click="count++">Count: {{ count }}</button>
+  </div>
+</template>
+
+<style scoped>
+.app {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+button {
+  padding: 0.5rem 1rem;
+  font-size: 1rem;
+  cursor: pointer;
+}
+</style>
+''',
+        "src/style.css": '''* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; }
+''',
+    },
+    "python-lib": {
+        "pyproject.toml": '''[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mylib"
+version = "0.1.0"
+description = "A Python library"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+''',
+        "src/mylib/__init__.py": '''"""mylib — a Python library."""
+
+__version__ = "0.1.0"
+
+from mylib.core import hello
+''',
+        "src/mylib/core.py": '''"""Core functionality."""
+
+
+def hello(name: str = "world") -> str:
+    """Return a greeting string."""
+    return f"Hello, {name}!"
+''',
+        "tests/test_core.py": '''"""Tests for core module."""
+from mylib.core import hello
+
+
+def test_hello_default():
+    assert hello() == "Hello, world!"
+
+
+def test_hello_name():
+    assert hello("Python") == "Hello, Python!"
+''',
+    },
 }
 
 
@@ -343,14 +699,23 @@ def tool_scaffold(args: str) -> str:
 
     created = []
     for filepath, content in template.items():
+        # Replace placeholder names in file paths
+        if project_name:
+            safe_name = project_name.replace("-", "_")
+            filepath = filepath.replace("myproject", safe_name)
+            filepath = filepath.replace("mylib", safe_name)
         full_path = base_dir / filepath
         full_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Replace project name in content if provided
         if project_name:
+            safe_name = project_name.replace("-", "_")
             content = content.replace("my-react-app", project_name)
+            content = content.replace("my-vue-app", project_name)
             content = content.replace("my-api", project_name)
             content = content.replace("My App", project_name.replace("-", " ").title())
+            content = content.replace("myproject", safe_name)
+            content = content.replace("mylib", safe_name)
 
         full_path.write_text(content, encoding="utf-8")
         created.append(str(filepath))

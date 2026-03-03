@@ -51,6 +51,14 @@ _READ_ONLY_TOOLS = {
     "curl",
     "fetch_url",
     "check_url",
+    "db_schema",
+    "db_tables",
+    "docker_ps",
+    "docker_logs",
+    "dotenv_read",
+    "json_query",
+    "json_validate",
+    "yaml_to_json",
 }
 
 
@@ -361,6 +369,47 @@ ENVIRONMENT:
 <tool:env_set>VARIABLE_NAME|value</tool>
 <tool:env_list></tool>
 <tool:create_venv>path</tool>
+
+DATABASE:
+<tool:db_query>database_path|sql_query</tool>
+<tool:db_query>database_path|sql_query|write</tool>
+<tool:db_schema>database_path</tool>
+<tool:db_tables>database_path</tool>
+<tool:db_create>database_path|sql_schema</tool>
+
+DOCKER:
+<tool:docker_build>image_name</tool>
+<tool:docker_build>image_name|dockerfile_path</tool>
+<tool:docker_run>image_name</tool>
+<tool:docker_run>image_name|ports|env_vars</tool>
+<tool:docker_ps></tool>
+<tool:docker_logs>container_id</tool>
+<tool:docker_compose>command</tool>
+
+TESTING:
+<tool:run_tests></tool>
+<tool:run_tests>path_or_filter</tool>
+<tool:test_file>filepath</tool>
+<tool:test_coverage></tool>
+<tool:test_coverage>path_or_filter</tool>
+
+LINTING / FORMATTING:
+<tool:lint></tool>
+<tool:lint>filepath_or_dir</tool>
+<tool:format_code>filepath_or_dir</tool>
+<tool:type_check></tool>
+<tool:type_check>filepath_or_dir</tool>
+
+DOTENV:
+<tool:dotenv_read>.env</tool>
+<tool:dotenv_set>KEY|value</tool>
+<tool:dotenv_init></tool>
+
+JSON / YAML:
+<tool:json_query>filepath|json_path</tool>
+<tool:json_validate>filepath</tool>
+<tool:json_validate>filepath|schema_path</tool>
+<tool:yaml_to_json>filepath</tool>
 
 TEMPLATING:
 <tool:scaffold>type|name</tool>

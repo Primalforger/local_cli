@@ -69,6 +69,25 @@ _SUBMODULE_TOOLS: dict[str, list[str]] = {
         "tool_env_get", "tool_env_set", "tool_env_list", "tool_create_venv",
     ],
     "tools.scaffold": ["tool_scaffold"],
+    "tools.database": [
+        "tool_db_query", "tool_db_schema", "tool_db_tables", "tool_db_create",
+    ],
+    "tools.docker": [
+        "tool_docker_build", "tool_docker_run", "tool_docker_ps",
+        "tool_docker_logs", "tool_docker_compose",
+    ],
+    "tools.testing": [
+        "tool_run_tests", "tool_test_file", "tool_test_coverage",
+    ],
+    "tools.lint": [
+        "tool_lint", "tool_format_code", "tool_type_check",
+    ],
+    "tools.dotenv": [
+        "tool_dotenv_read", "tool_dotenv_set", "tool_dotenv_init",
+    ],
+    "tools.json_tools": [
+        "tool_json_query", "tool_json_validate", "tool_yaml_to_json",
+    ],
 }
 
 # Canonical tool name -> function name (strip "tool_" prefix for the map key)

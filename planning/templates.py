@@ -253,6 +253,166 @@ TEMPLATES: dict[str, dict[str, str]] = {
             "with multi-stage builds"
         ),
     },
+
+    # ── Go ─────────────────────────────────────────────────────
+    "go-api": {
+        "description": "Go REST API with Gin",
+        "category": "backend",
+        "tech": "Go, Gin, SQLite, GORM",
+        "prompt": (
+            "a REST API using Go with Gin web framework, GORM ORM with "
+            "SQLite database, structured project layout (cmd/api, internal/), "
+            "middleware for logging and CORS, CRUD endpoints, input validation, "
+            "error handling, and health check endpoint"
+        ),
+    },
+    "go-cli": {
+        "description": "Go CLI tool with Cobra",
+        "category": "tool",
+        "tech": "Go, Cobra, Viper",
+        "prompt": (
+            "a Go CLI tool using Cobra for command structure and Viper for "
+            "configuration management, with subcommands, persistent flags, "
+            "configuration file support (YAML/JSON), colored terminal output, "
+            "and comprehensive help documentation"
+        ),
+    },
+
+    # ── Java ───────────────────────────────────────────────────
+    "spring-boot": {
+        "description": "Spring Boot REST API",
+        "category": "backend",
+        "tech": "Java, Spring Boot, JPA, H2",
+        "prompt": (
+            "a Spring Boot REST API with Spring Data JPA, H2 embedded database, "
+            "entity models with validation, repository pattern, service layer, "
+            "REST controllers with CRUD endpoints, exception handling with "
+            "@ControllerAdvice, and application.yml configuration"
+        ),
+    },
+
+    # ── Node/TypeScript Backend ────────────────────────────────
+    "express": {
+        "description": "Express.js TypeScript API",
+        "category": "backend",
+        "tech": "TypeScript, Express, Prisma, SQLite",
+        "prompt": (
+            "an Express.js REST API with TypeScript, Prisma ORM with SQLite, "
+            "structured project layout (src/routes, src/middleware, src/services), "
+            "input validation with zod, error handling middleware, CORS, "
+            "request logging, and health check endpoint"
+        ),
+    },
+
+    # ── GraphQL ────────────────────────────────────────────────
+    "graphql-python": {
+        "description": "GraphQL API with Strawberry",
+        "category": "backend",
+        "tech": "Python, Strawberry, FastAPI, SQLite",
+        "prompt": (
+            "a GraphQL API using Strawberry with FastAPI integration, SQLite "
+            "database, type-safe schema with queries and mutations, resolver "
+            "functions, input types with validation, pagination support, "
+            "error handling, and GraphiQL playground"
+        ),
+    },
+    "graphql-node": {
+        "description": "GraphQL API with Apollo Server",
+        "category": "backend",
+        "tech": "TypeScript, Apollo Server, Prisma, SQLite",
+        "prompt": (
+            "a GraphQL API using Apollo Server with TypeScript, Prisma ORM "
+            "with SQLite, type definitions, resolvers, input validation, "
+            "context setup, error handling with custom errors, DataLoader "
+            "for N+1 prevention, and GraphQL Playground"
+        ),
+    },
+
+    # ── Mobile ─────────────────────────────────────────────────
+    "react-native": {
+        "description": "React Native mobile app with Expo",
+        "category": "mobile",
+        "tech": "TypeScript, React Native, Expo, React Navigation",
+        "prompt": (
+            "a React Native mobile app using Expo with TypeScript, React "
+            "Navigation for routing, screen components, a tab navigator, "
+            "state management with context, API service layer, async storage "
+            "for persistence, and responsive styling"
+        ),
+    },
+    "flutter": {
+        "description": "Flutter mobile app with Provider",
+        "category": "mobile",
+        "tech": "Dart, Flutter, Provider",
+        "prompt": (
+            "a Flutter mobile application with Provider for state management, "
+            "screen navigation with named routes, reusable widget components, "
+            "API service layer with http package, local storage with shared_preferences, "
+            "theme configuration, and proper project structure"
+        ),
+    },
+
+    # ── Additional Frontend ────────────────────────────────────
+    "astro": {
+        "description": "Astro static site",
+        "category": "frontend",
+        "tech": "TypeScript, Astro, Tailwind CSS",
+        "prompt": (
+            "an Astro static site with TypeScript, Tailwind CSS for styling, "
+            "layout components, page routing, content collections for blog/docs, "
+            "SEO optimization with meta tags, responsive design, and "
+            "static asset handling"
+        ),
+    },
+
+    # ── Full Stack (additional) ────────────────────────────────
+    "htmx": {
+        "description": "FastAPI + HTMX full-stack",
+        "category": "fullstack",
+        "tech": "Python, FastAPI, HTMX, Jinja2, Tailwind CSS",
+        "prompt": (
+            "a full-stack web application using FastAPI with HTMX for "
+            "dynamic interactions, Jinja2 templates, Tailwind CSS for styling, "
+            "SQLite database, partial template responses for HTMX swaps, "
+            "form handling, and progressive enhancement"
+        ),
+    },
+
+    # ── Additional Tools ───────────────────────────────────────
+    "chrome-extension": {
+        "description": "Chrome browser extension",
+        "category": "tool",
+        "tech": "TypeScript, Chrome Extension API, Vite",
+        "prompt": (
+            "a Chrome browser extension with TypeScript, Vite for building, "
+            "manifest v3, popup UI, content script, background service worker, "
+            "chrome.storage for persistence, message passing between components, "
+            "and options page"
+        ),
+    },
+    "python-lib": {
+        "description": "Python library with pyproject.toml",
+        "category": "tool",
+        "tech": "Python, pytest, pyproject.toml",
+        "prompt": (
+            "a Python library package with pyproject.toml configuration, "
+            "src layout (src/package_name/), type hints throughout, pytest "
+            "test suite, __init__.py with public API exports, docstrings, "
+            "and a clean project structure ready for PyPI publishing"
+        ),
+    },
+    "monorepo": {
+        "description": "Turborepo monorepo",
+        "category": "fullstack",
+        "tech": "TypeScript, Turborepo, React, Express, pnpm",
+        "prompt": (
+            "a Turborepo monorepo with pnpm workspaces, a React frontend "
+            "app (apps/web), an Express API backend (apps/api), shared "
+            "TypeScript packages (packages/shared), turbo.json pipeline "
+            "configuration, shared ESLint and TypeScript configs, and "
+            "proper workspace dependency management"
+        ),
+    },
 }
 
 # Validate built-in templates at import time (dev safety net)
@@ -566,7 +726,7 @@ def display_templates():
 
     # Display in logical order
     category_order = [
-        "backend", "frontend", "fullstack", "tool",
+        "backend", "frontend", "fullstack", "mobile", "tool",
         "bot", "desktop", "data", "custom",
     ]
 
@@ -817,6 +977,168 @@ FEATURE_PATTERNS: dict[str, dict] = {
             "Dockerfile",
             "docker-compose.yml",
             "Makefile",
+        ],
+    },
+    "testing": {
+        "description": "Add test suite to existing project",
+        "applicable_to": [
+            "python", "fastapi", "flask", "django", "express",
+            "node", "react", "vue", "go", "rust",
+        ],
+        "prompt_template": (
+            "Add a comprehensive test suite to the existing project. "
+            "Include: test configuration, unit tests for core modules, "
+            "integration tests for API endpoints (if applicable), test fixtures "
+            "and factories, mocking utilities, and CI-ready test commands. "
+            "Follow the project's existing patterns and conventions."
+        ),
+        "typical_files": [
+            "tests/conftest.py",
+            "tests/test_core.py",
+            "tests/test_api.py",
+        ],
+    },
+    "api-docs": {
+        "description": "Add OpenAPI/Swagger documentation",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node", "go"],
+        "prompt_template": (
+            "Add OpenAPI/Swagger API documentation to the existing project. "
+            "Include: API schema definitions, endpoint documentation with "
+            "request/response examples, authentication documentation, "
+            "interactive Swagger UI endpoint, and exportable OpenAPI spec."
+        ),
+        "typical_files": [
+            "docs/openapi.yaml",
+            "src/docs.py",
+        ],
+    },
+    "rate-limiting": {
+        "description": "Add rate limiting middleware",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node", "go"],
+        "prompt_template": (
+            "Add rate limiting middleware to the existing project. "
+            "Include: configurable rate limits per endpoint or route group, "
+            "IP-based and optional token-based limiting, proper HTTP 429 "
+            "responses with Retry-After headers, in-memory store with "
+            "optional Redis backend, and rate limit tests."
+        ),
+        "typical_files": [
+            "src/middleware/rate_limit.py",
+            "tests/test_rate_limit.py",
+        ],
+    },
+    "file-upload": {
+        "description": "Add file upload handling",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node"],
+        "prompt_template": (
+            "Add file upload handling to the existing project. "
+            "Include: upload endpoint with multipart form support, "
+            "file type validation and size limits, secure filename generation, "
+            "local storage with configurable upload directory, file metadata "
+            "tracking, download endpoint, and upload tests."
+        ),
+        "typical_files": [
+            "src/uploads.py",
+            "src/routes/upload.py",
+            "tests/test_upload.py",
+        ],
+    },
+    "background-jobs": {
+        "description": "Add background task queue",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node"],
+        "prompt_template": (
+            "Add background task processing to the existing project. "
+            "Include: task queue setup, task definition and registration, "
+            "async task execution, task status tracking, retry logic with "
+            "exponential backoff, dead letter handling, and task tests. "
+            "Use Celery for Python or Bull for Node.js."
+        ),
+        "typical_files": [
+            "src/tasks.py",
+            "src/worker.py",
+            "tests/test_tasks.py",
+        ],
+    },
+    "email": {
+        "description": "Add email sending (SMTP/SendGrid)",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node"],
+        "prompt_template": (
+            "Add email sending capability to the existing project. "
+            "Include: email service abstraction, SMTP and SendGrid backends, "
+            "HTML email templates, template rendering, configuration via "
+            "environment variables, email queue for async sending, and tests "
+            "with mock SMTP server."
+        ),
+        "typical_files": [
+            "src/email.py",
+            "src/templates/email/",
+            "tests/test_email.py",
+        ],
+    },
+    "search": {
+        "description": "Add full-text search",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node"],
+        "prompt_template": (
+            "Add full-text search to the existing project. "
+            "Include: search index setup, document indexing, search endpoint "
+            "with query parsing, result ranking and highlighting, pagination, "
+            "search filters, and search tests. Use SQLite FTS5 for Python "
+            "or Elasticsearch/MeiliSearch for Node.js."
+        ),
+        "typical_files": [
+            "src/search.py",
+            "src/routes/search.py",
+            "tests/test_search.py",
+        ],
+    },
+    "error-tracking": {
+        "description": "Add centralized error handling/tracking",
+        "applicable_to": [
+            "python", "fastapi", "flask", "django", "express",
+            "node", "react", "vue",
+        ],
+        "prompt_template": (
+            "Add centralized error handling and tracking to the existing project. "
+            "Include: custom exception hierarchy, global error handler middleware, "
+            "structured error responses, error logging with context, optional "
+            "Sentry integration, error notification hooks, and error handling tests."
+        ),
+        "typical_files": [
+            "src/errors.py",
+            "src/middleware/error_handler.py",
+            "tests/test_errors.py",
+        ],
+    },
+    "docker": {
+        "description": "Dockerize existing project",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node", "go", "rust"],
+        "prompt_template": (
+            "Dockerize the existing project. "
+            "Include: multi-stage Dockerfile optimized for production, "
+            "docker-compose.yml for local development, .dockerignore, "
+            "health check configuration, environment variable handling, "
+            "volume mounts for development, and documentation for running "
+            "with Docker."
+        ),
+        "typical_files": [
+            "Dockerfile",
+            "docker-compose.yml",
+            ".dockerignore",
+        ],
+    },
+    "pagination": {
+        "description": "Add API pagination (cursor/offset)",
+        "applicable_to": ["python", "fastapi", "flask", "django", "express", "node", "go"],
+        "prompt_template": (
+            "Add API pagination to the existing project. "
+            "Include: pagination utility with both cursor-based and offset-based "
+            "modes, consistent pagination response format with total count and "
+            "next/previous links, configurable page size with limits, "
+            "integration with existing list endpoints, and pagination tests."
+        ),
+        "typical_files": [
+            "src/pagination.py",
+            "tests/test_pagination.py",
         ],
     },
 }
