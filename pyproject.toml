@@ -23,43 +23,51 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.4",
 ]
+mcp = [
+    "mcp[cli]>=1.0",
+]
 
 [project.scripts]
 ai = "cli:main"
+ai-mcp = "mcp_server:main"
 
 [tool.setuptools]
+packages = ["core", "planning", "llm", "tools", "adaptive", "utils"]
 py-modules = [
-    "adaptive_engine",
-    "adaptive_seed",
-    "aiignore",
-    "builder",
-    "chat",
     "cli",
-    "clipboard",
+    "mcp_server",
+    # Root shims (backwards compatibility)
     "config",
-    "context_manager",
-    "diff_editor",
+    "chat",
     "display",
-    "error_diagnosis",
-    "file_utils",
-    "git_integration",
-    "llm_backend",
-    "logging_util",
+    "command_registry",
+    "session_manager",
+    "context_manager",
     "memory",
-    "metrics",
-    "model_router",
-    "outcome_tracker",
+    "undo",
     "planner",
+    "builder",
     "project_context",
     "project_reviewer",
-    "prompt_optimizer",
-    "prompts",
-    "session_manager",
     "templates",
-    "tool_registry",
-    "tools",
-    "undo",
+    "llm_backend",
+    "model_router",
+    "prompts",
+    "adaptive_engine",
+    "adaptive_seed",
+    "outcome_tracker",
+    "prompt_optimizer",
+    "sandbox",
+    "file_utils",
+    "git_integration",
+    "diff_editor",
+    "error_diagnosis",
+    "clipboard",
+    "aiignore",
     "watch_mode",
+    "metrics",
+    "logging_util",
+    "tool_registry",
 ]
 
 [tool.pytest.ini_options]

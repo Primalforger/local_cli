@@ -7,13 +7,16 @@ A powerful command-line coding assistant that runs entirely on your machine usin
 - **Interactive chat** with streaming responses and tool use (file I/O, shell commands, project scanning)
 - **Project planning & building** — describe what you want, get a structured plan, then build it step-by-step with auto-testing and error diagnosis
 - **20+ project templates** — FastAPI, React, Next.js, Django, Electron, Tauri, Rust CLI, Discord bots, and more
+- **Adaptive ML engine** — learns from your usage patterns with task classification and prompt optimization
 - **Multi-model routing** — automatically selects the best local model for each task (code generation, debugging, explanation, etc.)
 - **Project review** — full codebase analysis with quality scores, issue detection, and improvement suggestions
 - **Git integration** — auto-commits, checkpoints before risky operations, rollback support
+- **Command sandbox** — blocks dangerous shell commands, scans for leaked secrets
 - **Watch mode** — monitors files for changes and responds automatically
 - **Context management** — token budgeting with auto-compaction to stay within model limits
 - **Session persistence** — save, load, search, and branch conversations
 - **Project memory** — remembers architectural decisions, patterns, and preferences across sessions
+- **MCP server** — expose tools via Model Context Protocol for Claude Desktop and other clients
 - **Undo/redo** — conversation snapshots with named branches
 - **Clipboard support** — paste code in, copy responses out
 - **Cross-platform** — Windows, macOS, Linux
@@ -80,6 +83,79 @@ python cli.py --system "You are a Python expert" "optimize this function"
 ```
 
 If you ran `setup.ps1` or `setup.sh`, you can use the `ai` alias instead of `python cli.py`.
+
+## Architecture
+
+The codebase is organized into logical sub-packages with entry points at the root.
+
+```
+local_cli/
+├── cli.py                    # Entry point — REPL, command dispatch
+├── mcp_server.py             # Entry point — MCP stdio server
+│
+├── core/                     # Chat engine, config, display, sessions
+│   ├── chat.py               #   Streaming chat with tool-call loop
+│   ├── config.py             #   Config loading, defaults, paths
+│   ├── display.py            #   Verbosity control, output toggles
+│   ├── command_registry.py   #   Slash-command decorator registry
+│   ├── context_manager.py    #   Token budgeting, auto-compaction
+│   ├── session_manager.py    #   Save/load/search conversations
+│   ├── memory.py             #   Per-project .ai_memory.json
+│   └── undo.py               #   Conversation snapshots & branches
+│
+├── planning/                 # Plan → build pipeline
+│   ├── planner.py            #   Structured JSON plan generation
+│   ├── builder.py            #   Step-by-step execution, auto-test/fix
+│   ├── project_context.py    #   Codebase scanning, language detection
+│   ├── project_reviewer.py   #   Code review, feature suggestions
+│   └── templates.py          #   20+ project starter templates
+│
+├── llm/                      # LLM abstraction layer
+│   ├── llm_backend.py        #   Ollama streaming backend (MOSA)
+│   ├── model_router.py       #   Task detection, model selection
+│   └── prompts.py            #   Built-in + custom prompt templates
+│
+├── tools/                    # Tool implementations (13 modules)
+│   ├── file_ops.py           #   read, write, edit, copy, diff, hash
+│   ├── directory_ops.py      #   list, tree, find, mkdir
+│   ├── search.py             #   grep, search-replace
+│   ├── shell.py              #   run commands, background processes
+│   ├── git_tools.py          #   Git operations
+│   ├── web.py                #   HTTP requests, URL checks, serve
+│   ├── analysis.py           #   Syntax check, import validation
+│   ├── package.py            #   pip/npm install, dependency listing
+│   ├── archive.py            #   Create/extract archives
+│   ├── env.py                #   Environment variables, venv
+│   └── scaffold.py           #   Project scaffolding
+│
+├── adaptive/                 # ML-based learning system
+│   ├── adaptive_engine.py    #   Task classifier (sklearn / fallback)
+│   ├── adaptive_seed.py      #   Bootstrap training data
+│   ├── outcome_tracker.py    #   Success/failure recording
+│   └── prompt_optimizer.py   #   Epsilon-greedy prompt tuning
+│
+├── utils/                    # Shared utilities
+│   ├── sandbox.py            #   Command sandboxing, secret scanning
+│   ├── file_utils.py         #   Atomic writes
+│   ├── git_integration.py    #   Git commits, checkpoints, rollback
+│   ├── diff_editor.py        #   Parse/apply <file> edit blocks
+│   ├── error_diagnosis.py    #   Test error parsing, fix guidance
+│   ├── clipboard.py          #   Cross-platform clipboard
+│   ├── aiignore.py           #   .aiignore pattern matching
+│   ├── watch_mode.py         #   File change monitoring
+│   ├── metrics.py            #   Performance tracking (tok/s, timing)
+│   ├── logging_util.py       #   Centralized logging setup
+│   └── tool_registry.py      #   MOSA-compliant tool plugin system
+│
+├── tests/                    # 303 tests (pytest)
+├── *.py (root shims)         # Backwards-compat re-exports
+├── pyproject.toml
+└── CLAUDE.md
+```
+
+**Data flow (chat):** User input → `cli.py` → `core/chat.py` (streams via `llm/llm_backend.py`) → parses tool calls → `tools/*` executes → results fed back → Rich-formatted output.
+
+**Data flow (plan/build):** `/plan` → `planning/planner.py` → `/build` → `planning/builder.py` (auto-test/fix loop, git checkpoints).
 
 ## Commands
 
@@ -239,20 +315,51 @@ Key settings:
 
 Change settings at runtime with `/config <key> <value>`, or save permanently with `/save`.
 
+## MCP Server
+
+Expose tools via [Model Context Protocol](https://modelcontextprotocol.io/) for Claude Desktop or other MCP clients:
+
+```bash
+# Direct run
+python mcp_server.py
+
+# Via entry point (after pip install -e .)
+ai-mcp
+```
+
+Claude Desktop config (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "local-ai-cli": {
+      "command": "ai-mcp",
+      "env": { "LOCALCLI_PROJECT_DIR": "/path/to/project" }
+    }
+  }
+}
+```
+
+Install the optional MCP dependency: `pip install -e ".[mcp]"`
+
 ## Development
 
 ```bash
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
+# Run tests (303 tests)
 pytest tests/ -v
 
 # Lint (requires ruff)
 ruff check .
 ```
 
-The test suite covers config validation, token estimation, path security, diff editing, project memory, and file ignore patterns.
+The test suite covers config validation, token estimation, path security, diff editing, error diagnosis, command sandboxing, secret scanning, tool registry plugins, project memory, adaptive engine, prompt optimization, and file ignore patterns.
+
+### Project layout
+
+Source code lives in five sub-packages (`core/`, `planning/`, `llm/`, `adaptive/`, `utils/`) plus the existing `tools/` package. One-line shim files at the root re-export each moved module for backwards compatibility — `from config import load_config` and `from core.config import load_config` both work.
 
 ## Dependencies
 
@@ -262,14 +369,17 @@ The test suite covers config validation, token estimation, path security, diff e
 | [rich](https://github.com/Textualize/rich) | Terminal formatting, syntax highlighting, panels |
 | [prompt_toolkit](https://python-prompt-toolkit.readthedocs.io/) | Interactive input with history and completions |
 | [pyyaml](https://pyyaml.org/) | YAML config file parsing |
+| [scikit-learn](https://scikit-learn.org/) | Adaptive task classification (optional, graceful fallback) |
+| [joblib](https://joblib.readthedocs.io/) | Model persistence for adaptive engine |
 
-### Dev Dependencies
+### Dev / Optional Dependencies
 
 | Package | Purpose |
 |---|---|
 | [pytest](https://docs.pytest.org/) | Test framework |
 | [pytest-cov](https://pytest-cov.readthedocs.io/) | Coverage reporting |
 | [ruff](https://docs.astral.sh/ruff/) | Fast Python linter |
+| [mcp](https://pypi.org/project/mcp/) | Model Context Protocol server (optional) |
 
 ## License
 

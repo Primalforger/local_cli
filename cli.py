@@ -15,10 +15,11 @@ from rich.markdown import Markdown
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 
-from config import load_config, save_config, HISTORY_FILE, ensure_dirs
-from chat import ChatSession
-from metrics import MetricsTracker
+from core.config import load_config, save_config, HISTORY_FILE, ensure_dirs
+from core.chat import ChatSession
+from utils.metrics import MetricsTracker
 from tools import set_tool_config, set_auto_confirm
+from core.command_registry import registry, command, CommandContext
 
 console = Console()
 
@@ -37,880 +38,989 @@ def _ensure_session_attrs(session: ChatSession):
         session._last_suggestions = None
 
 
-# ── Slash Commands ─────────────────────────────────────────────
+# ── Slash Commands (registered via @command decorator) ────────
 
-def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
-    _ensure_session_attrs(session)
+@command("/quit", aliases=["/exit", "/q"], description="Exit", category="Core")
+def cmd_quit(ctx: CommandContext):
+    ctx.console.print("[yellow]Goodbye![/yellow]")
+    sys.exit(0)
 
-    parts = cmd.strip().split(maxsplit=1)
-    command = parts[0].lower()
-    arg = parts[1] if len(parts) > 1 else ""
 
-    # ── Core ───────────────────────────────────────────────────
-    if command in ("/quit", "/exit", "/q"):
-        console.print("[yellow]Goodbye![/yellow]")
-        sys.exit(0)
+@command("/reset", description="Clear conversation", category="Core")
+def cmd_reset(ctx: CommandContext):
+    ctx.session.reset()
 
-    elif command == "/reset":
-        session.reset()
 
-    elif command == "/compact":
-        session.compact()
+@command("/compact", description="Smart-compress context", category="Context")
+def cmd_compact(ctx: CommandContext):
+    ctx.session.compact()
 
-    elif command == "/model":
-        if arg:
-            config["model"] = arg
-            session.config["model"] = arg
-            console.print(f"[green]Model → {arg}[/green]")
-        else:
-            console.print(f"Current model: [cyan]{config['model']}[/cyan]")
 
-    elif command == "/models":
+@command("/model", description="Switch model", category="Core")
+def cmd_model(ctx: CommandContext):
+    if ctx.arg:
+        ctx.config["model"] = ctx.arg
+        ctx.session.config["model"] = ctx.arg
+        ctx.console.print(f"[green]Model → {ctx.arg}[/green]")
+    else:
+        ctx.console.print(f"Current model: [cyan]{ctx.config['model']}[/cyan]")
+
+
+@command("/models", description="List available models", category="Core")
+def cmd_models(ctx: CommandContext):
+    try:
+        resp = httpx.get(f"{ctx.config['ollama_url']}/api/tags", timeout=5)
+        models = resp.json().get("models", [])
+        ctx.console.print("\n[bold]Available models:[/bold]")
+        for m in models:
+            name = m["name"]
+            size_gb = m.get("size", 0) / (1024 ** 3)
+            marker = (
+                " [green]◄ active[/green]"
+                if name == ctx.config["model"] else ""
+            )
+            ctx.console.print(f"  {name} ({size_gb:.1f}GB){marker}")
+        ctx.console.print()
+    except Exception as e:
+        ctx.console.print(f"[red]Error: {e}[/red]")
+
+
+@command("/tokens", description="Context usage estimate", category="Context")
+def cmd_tokens(ctx: CommandContext):
+    if hasattr(ctx.session, "budget"):
+        ctx.session.budget.display_detailed(ctx.session.messages)
+    else:
+        est = ctx.session.token_estimate()
+        ctx.console.print(
+            f"~{est:,} tokens in context "
+            f"({len(ctx.session.messages)} messages)"
+        )
+
+
+@command("/context", description="Show detailed context usage breakdown", category="Context")
+def cmd_context(ctx: CommandContext):
+    cmd_tokens(ctx)
+
+
+@command("/cd", description="Change directory", category="Core")
+def cmd_cd(ctx: CommandContext):
+    if ctx.arg:
         try:
-            resp = httpx.get(f"{config['ollama_url']}/api/tags", timeout=5)
-            models = resp.json().get("models", [])
-            console.print("\n[bold]Available models:[/bold]")
-            for m in models:
-                name = m["name"]
-                size_gb = m.get("size", 0) / (1024 ** 3)
-                marker = (
-                    " [green]◄ active[/green]"
-                    if name == config["model"] else ""
-                )
-                console.print(f"  {name} ({size_gb:.1f}GB){marker}")
-            console.print()
+            os.chdir(ctx.arg)
+            ctx.console.print(f"[green]Changed to: {os.getcwd()}[/green]")
         except Exception as e:
-            console.print(f"[red]Error: {e}[/red]")
+            ctx.console.print(f"[red]{e}[/red]")
+    else:
+        ctx.console.print(os.getcwd())
 
-    elif command == "/tokens":
-        if hasattr(session, "budget"):
-            session.budget.display_detailed(session.messages)
-        else:
-            est = session.token_estimate()
-            console.print(
-                f"~{est:,} tokens in context "
-                f"({len(session.messages)} messages)"
-            )
 
-    elif command == "/context":
-        if hasattr(session, "budget"):
-            session.budget.display_detailed(session.messages)
-        else:
-            est = session.token_estimate()
-            console.print(
-                f"~{est:,} tokens in context "
-                f"({len(session.messages)} messages)"
-            )
-
-    elif command == "/cd":
-        if arg:
+@command("/config", description="View/set config", category="Core")
+def cmd_config(ctx: CommandContext):
+    if ctx.arg:
+        kv = ctx.arg.split(maxsplit=1)
+        if len(kv) == 2:
+            key, value = kv
             try:
-                os.chdir(arg)
-                console.print(f"[green]Changed to: {os.getcwd()}[/green]")
-            except Exception as e:
-                console.print(f"[red]{e}[/red]")
-        else:
-            console.print(os.getcwd())
-
-    elif command == "/config":
-        if arg:
-            kv = arg.split(maxsplit=1)
-            if len(kv) == 2:
-                key, value = kv
+                value = int(value)
+            except ValueError:
                 try:
-                    value = int(value)
+                    value = float(value)
                 except ValueError:
-                    try:
-                        value = float(value)
-                    except ValueError:
-                        if value.lower() in ("true", "yes", "on"):
-                            value = True
-                        elif value.lower() in ("false", "no", "off"):
-                            value = False
-                config[key] = value
-                session.config[key] = value
-                set_tool_config(config)
-                console.print(f"[green]{key} = {value}[/green]")
-            else:
-                console.print("[yellow]Usage: /config <key> <value>[/yellow]")
+                    if value.lower() in ("true", "yes", "on"):
+                        value = True
+                    elif value.lower() in ("false", "no", "off"):
+                        value = False
+            ctx.config[key] = value
+            ctx.session.config[key] = value
+            set_tool_config(ctx.config)
+            ctx.console.print(f"[green]{key} = {value}[/green]")
         else:
-            for k, v in config.items():
-                console.print(f"  [cyan]{k}[/cyan] = {v}")
+            ctx.console.print("[yellow]Usage: /config <key> <value>[/yellow]")
+    else:
+        for k, v in ctx.config.items():
+            ctx.console.print(f"  [cyan]{k}[/cyan] = {v}")
 
-    # ── Save (config vs session) ───────────────────────────────
-    elif command == "/save":
-        if not arg:
-            save_config(config)
-            console.print("[green]Config saved.[/green]")
-        else:
-            from session_manager import save_session
-            save_session(session.messages, config, name=arg)
 
-    # ── Planning & Building ────────────────────────────────────
-    elif command == "/plan":
-        from planner import generate_plan, display_plan, save_plan
+@command("/save", description="Save config or session", category="Sessions")
+def cmd_save(ctx: CommandContext):
+    if not ctx.arg:
+        save_config(ctx.config)
+        ctx.console.print("[green]Config saved.[/green]")
+    else:
+        from core.session_manager import save_session
+        save_session(ctx.session.messages, ctx.config, name=ctx.arg)
 
-        if not arg:
-            console.print(
-                "[yellow]Usage: /plan <description of what to build>[/yellow]"
+
+# ── Planning & Building ────────────────────────────────────────
+
+@command("/plan", description="Generate project plan", category="Planning")
+def cmd_plan(ctx: CommandContext):
+    from planning.planner import generate_plan, display_plan, save_plan
+
+    if not ctx.arg:
+        ctx.console.print(
+            "[yellow]Usage: /plan <description of what to build>[/yellow]"
+        )
+        return
+
+    plan = generate_plan(ctx.arg, ctx.config)
+    if plan:
+        display_plan(plan)
+        ctx.console.print()
+        save_it = ctx.console.input(
+            "[bold]Save this plan? (y/n): [/bold]"
+        ).strip().lower()
+        if save_it in ("y", "yes"):
+            save_plan(plan)
+        ctx.session._current_plan = plan
+
+
+@command("/build", description="Execute plan with auto-test", category="Planning")
+def cmd_build(ctx: CommandContext):
+    from planning.builder import build_plan, load_progress
+    from planning.planner import load_plan
+
+    plan = None
+    start_step = 1
+    resume_base_dir = None
+
+    if "--resume" in ctx.arg or "resume" in ctx.arg:
+        progress = load_progress(".")
+        if progress:
+            plan = progress["plan"]
+            start_step = progress["next_step"]
+            resume_base_dir = progress.get("base_dir")
+            total_steps = len(plan.get("steps", []))
+            plan_name = plan.get("project_name", "unknown")
+            ctx.console.print(
+                f"[green]Resuming:[/green] [bold]{plan_name}[/bold] "
+                f"— step {start_step} of {total_steps}"
             )
-            return True
+            if resume_base_dir:
+                ctx.console.print(
+                    f"[dim]Project dir: {resume_base_dir}[/dim]"
+                )
+            if start_step > total_steps:
+                ctx.console.print(
+                    f"[red]⚠ Stale progress — step {start_step} doesn't "
+                    f"exist in this {total_steps}-step plan.[/red]"
+                )
+                ctx.console.print(
+                    "[dim]Delete .build_progress.json and "
+                    "re-run /improve or /build[/dim]"
+                )
+                return
+            confirm = ctx.console.input(
+                f"[bold]Resume '{plan_name}' at step "
+                f"{start_step}/{total_steps}? (y/n): [/bold]"
+            ).strip().lower()
+            if confirm not in ("y", "yes"):
+                ctx.console.print("[dim]Resume cancelled.[/dim]")
+                return
+        else:
+            ctx.console.print("[red]No build progress found.[/red]")
+            return
 
-        plan = generate_plan(arg, config)
+    elif ctx.arg and ctx.arg.strip() != "--resume":
+        plan = load_plan(ctx.arg)
+    elif hasattr(ctx.session, '_current_plan') and ctx.session._current_plan:
+        plan = ctx.session._current_plan
+    else:
+        ctx.console.print(
+            "[yellow]No plan loaded. Use /plan first "
+            "or /build <plan-name>[/yellow]"
+        )
+        return
+
+    if plan:
+        set_auto_confirm(True)
+        try:
+            build_plan(
+                plan, ctx.config,
+                start_step=start_step,
+                resume_base_dir=resume_base_dir,
+            )
+        finally:
+            set_auto_confirm(False)
+
+
+@command("/plans", description="List saved plans", category="Planning")
+def cmd_plans(ctx: CommandContext):
+    from planning.planner import list_plans
+    list_plans()
+
+
+@command("/template", description="Project templates", category="Planning")
+def cmd_template(ctx: CommandContext):
+    from planning.templates import TEMPLATES, get_template_prompt
+    from planning.planner import generate_plan, display_plan, save_plan
+
+    if not ctx.arg:
+        ctx.console.print("\n[bold]Available templates:[/bold]\n")
+        for name, info in TEMPLATES.items():
+            ctx.console.print(
+                f"  [cyan]{name:15}[/cyan] {info['description']}"
+            )
+        ctx.console.print(
+            "\n[dim]Usage: /template <name> [customization][/dim]"
+        )
+        return
+
+    tparts = ctx.arg.split(maxsplit=1)
+    template_name = tparts[0]
+    customization = tparts[1] if len(tparts) > 1 else ""
+
+    prompt = get_template_prompt(template_name, customization)
+    if prompt:
+        ctx.console.print(f"[green]Using template: {template_name}[/green]")
+        plan = generate_plan(prompt, ctx.config)
         if plan:
             display_plan(plan)
-            console.print()
-            save_it = console.input(
-                "[bold]Save this plan? (y/n): [/bold]"
+            save_it = ctx.console.input(
+                "\n[bold]Save and build? (y/n): [/bold]"
             ).strip().lower()
             if save_it in ("y", "yes"):
                 save_plan(plan)
-            session._current_plan = plan
-
-    elif command == "/build":
-        from builder import build_plan, load_progress
-        from planner import load_plan
-
-        plan = None
-        start_step = 1
-        resume_base_dir = None
-
-        if "--resume" in arg or "resume" in arg:
-            progress = load_progress(".")
-            if progress:
-                plan = progress["plan"]
-                start_step = progress["next_step"]
-                resume_base_dir = progress.get("base_dir")
-                total_steps = len(plan.get("steps", []))
-                plan_name = plan.get("project_name", "unknown")
-                console.print(
-                    f"[green]Resuming:[/green] [bold]{plan_name}[/bold] "
-                    f"— step {start_step} of {total_steps}"
-                )
-                if resume_base_dir:
-                    console.print(
-                        f"[dim]Project dir: {resume_base_dir}[/dim]"
-                    )
-                # Guard: stale progress file points beyond the current plan
-                if start_step > total_steps:
-                    console.print(
-                        f"[red]⚠ Stale progress — step {start_step} doesn't "
-                        f"exist in this {total_steps}-step plan.[/red]"
-                    )
-                    console.print(
-                        "[dim]Delete .build_progress.json and "
-                        "re-run /improve or /build[/dim]"
-                    )
-                    return True
-                confirm = console.input(
-                    f"[bold]Resume '{plan_name}' at step "
-                    f"{start_step}/{total_steps}? (y/n): [/bold]"
+                ctx.session._current_plan = plan
+                build_it = ctx.console.input(
+                    "[bold]Start building now? (y/n): [/bold]"
                 ).strip().lower()
-                if confirm not in ("y", "yes"):
-                    console.print("[dim]Resume cancelled.[/dim]")
-                    return True
-            else:
-                console.print("[red]No build progress found.[/red]")
-                return True
-
-        elif arg and arg.strip() != "--resume":
-            plan = load_plan(arg)
-        elif hasattr(session, '_current_plan') and session._current_plan:
-            plan = session._current_plan
-        else:
-            console.print(
-                "[yellow]No plan loaded. Use /plan first "
-                "or /build <plan-name>[/yellow]"
-            )
-            return True
-
-        if plan:
-            # Enable auto-confirm for build duration
-            set_auto_confirm(True)
-            try:
-                build_plan(
-                    plan, config,
-                    start_step=start_step,
-                    resume_base_dir=resume_base_dir,
-                )
-            finally:
-                # Always restore manual confirm after build
-                set_auto_confirm(False)
-
-    elif command == "/plans":
-        from planner import list_plans
-        list_plans()
-
-    elif command == "/template":
-        from templates import TEMPLATES, get_template_prompt
-        from planner import generate_plan, display_plan, save_plan
-
-        if not arg:
-            console.print("\n[bold]Available templates:[/bold]\n")
-            for name, info in TEMPLATES.items():
-                console.print(
-                    f"  [cyan]{name:15}[/cyan] {info['description']}"
-                )
-            console.print(
-                "\n[dim]Usage: /template <name> [customization][/dim]"
-            )
-            return True
-
-        tparts = arg.split(maxsplit=1)
-        template_name = tparts[0]
-        customization = tparts[1] if len(tparts) > 1 else ""
-
-        prompt = get_template_prompt(template_name, customization)
-        if prompt:
-            console.print(f"[green]Using template: {template_name}[/green]")
-            plan = generate_plan(prompt, config)
-            if plan:
-                display_plan(plan)
-                save_it = console.input(
-                    "\n[bold]Save and build? (y/n): [/bold]"
-                ).strip().lower()
-                if save_it in ("y", "yes"):
-                    save_plan(plan)
-                    session._current_plan = plan
-                    build_it = console.input(
-                        "[bold]Start building now? (y/n): [/bold]"
-                    ).strip().lower()
-                    if build_it in ("y", "yes"):
-                        from builder import build_plan
-                        set_auto_confirm(True)
-                        try:
-                            build_plan(plan, config)
-                        finally:
-                            set_auto_confirm(False)
-        else:
-            console.print(f"[red]Unknown template: {template_name}[/red]")
-
-    elif command == "/review":
-        if not session._current_plan:
-            console.print("[yellow]No plan loaded. Use /plan first.[/yellow]")
-            return True
-        plan = session._current_plan
-        session.send(
-            f"Review this project plan and suggest improvements:\n"
-            f"```json\n{json.dumps(plan, indent=2)}\n```\n\n"
-            f"Consider: missing steps, security, architecture, "
-            f"edge cases, testing."
-        )
-
-    elif command == "/revise":
-        from planner import PLAN_SYSTEM_PROMPT, display_plan
-
-        if not session._current_plan:
-            console.print("[yellow]No plan loaded. Use /plan first.[/yellow]")
-            return True
-        if not arg:
-            console.print("[yellow]Usage: /revise <what to change>[/yellow]")
-            return True
-
-        plan = session._current_plan
-        revise_prompt = (
-            f"Current plan:\n"
-            f"```json\n{json.dumps(plan, indent=2)}\n```\n\n"
-            f"Revise based on: {arg}\n\n"
-            f"Respond with the COMPLETE updated JSON plan."
-        )
-
-        url = f"{config['ollama_url']}/api/chat"
-        payload = {
-            "model": config["model"],
-            "messages": [
-                {"role": "system", "content": PLAN_SYSTEM_PROMPT},
-                {"role": "user", "content": revise_prompt},
-            ],
-            "stream": True,
-            "options": {
-                "temperature": 0.3,
-                "num_ctx": config.get("num_ctx", 32768),
-            },
-        }
-
-        console.print("\n[bold yellow]🧠 Revising plan...[/bold yellow]\n")
-        full_response = ""
-        try:
-            with httpx.stream(
-                "POST", url, json=payload, timeout=120.0
-            ) as resp:
-                for line in resp.iter_lines():
-                    if line:
-                        data = json.loads(line)
-                        chunk = data.get("message", {}).get("content", "")
-                        if chunk:
-                            full_response += chunk
-                            print(chunk, end="", flush=True)
-                        if data.get("done"):
-                            break
-        except Exception as e:
-            console.print(f"\n[red]Error: {e}[/red]")
-            return True
-
-        print()
-        try:
-            json_match = re.search(r"\{.*\}", full_response, re.DOTALL)
-            if json_match:
-                revised = json.loads(json_match.group())
-                session._current_plan = revised
-                display_plan(revised)
-                console.print(
-                    "[green]Plan revised! Use /build to execute.[/green]"
-                )
-        except Exception:
-            console.print("[red]Could not parse revised plan.[/red]")
-
-    # ── Git ────────────────────────────────────────────────────
-    elif command == "/git":
-        from git_integration import (
-            is_git_repo, init_repo, show_diff, get_log,
-            list_checkpoints, rollback_to_checkpoint,
-            rollback_last_commit, run_git, get_full_diff,
-        )
-
-        subcmd = arg.split(maxsplit=1)
-        sub = subcmd[0] if subcmd else "status"
-        sub_arg = subcmd[1] if len(subcmd) > 1 else ""
-
-        if sub == "init":
-            init_repo(os.getcwd())
-        elif sub == "diff":
-            show_diff(os.getcwd())
-        elif sub == "log":
-            log = get_log(os.getcwd())
-            if log:
-                console.print(log)
-            else:
-                console.print("[dim]No git history.[/dim]")
-        elif sub == "undo":
-            rollback_last_commit(os.getcwd())
-        elif sub == "checkpoints":
-            cps = list_checkpoints(os.getcwd())
-            if cps:
-                for cp in cps:
-                    console.print(f"  🏷️  {cp}")
-            else:
-                console.print("[dim]No checkpoints.[/dim]")
-        elif sub == "rollback":
-            if sub_arg:
-                rollback_to_checkpoint(os.getcwd(), sub_arg)
-            else:
-                console.print(
-                    "[yellow]Usage: /git rollback <checkpoint-tag>[/yellow]"
-                )
-        elif sub == "commit":
-            diff = get_full_diff(os.getcwd())
-            if diff:
-                if sub_arg:
-                    run_git("add -A", cwd=os.getcwd())
-                    run_git(f'commit -m "{sub_arg}"', cwd=os.getcwd())
-                    console.print("[green]Committed.[/green]")
-                else:
-                    session.send(
-                        "Generate a conventional commit message for "
-                        f"this diff:\n\n```diff\n{diff[:3000]}\n```"
-                    )
-            else:
-                console.print("[dim]No changes to commit.[/dim]")
-        elif sub == "status":
-            result = run_git("status --short", cwd=os.getcwd())
-            if result and result.get("stdout"):
-                console.print(result["stdout"])
-            else:
-                console.print("[dim]Clean working tree.[/dim]")
-        else:
-            console.print(
-                "[yellow]Git: init, status, diff, log, commit, "
-                "undo, checkpoints, rollback[/yellow]"
-            )
-
-    # ── Sessions ───────────────────────────────────────────────
-    elif command == "/load":
-        from session_manager import load_session, list_sessions
-
-        if not arg:
-            list_sessions()
-            console.print("[dim]Usage: /load <number or name>[/dim]")
-            return True
-        result = load_session(arg)
-        if result:
-            session.messages, model_info = result
-            if "model" in model_info:
-                config["model"] = model_info["model"]
-                session.config["model"] = model_info["model"]
-
-    elif command == "/sessions":
-        from session_manager import list_sessions
-        list_sessions()
-
-    elif command == "/search":
-        from session_manager import search_sessions
-        if arg:
-            search_sessions(arg)
-        else:
-            console.print("[yellow]Usage: /search <query>[/yellow]")
-
-    # ── Prompts ────────────────────────────────────────────────
-    elif command == "/prompt":
-        from prompts import get_prompt, list_prompts
-
-        if not arg:
-            prompts = list_prompts()
-            console.print("\n[bold]Prompt Templates:[/bold]\n")
-            for name, desc in prompts.items():
-                console.print(f"  [cyan]{name:15}[/cyan] {desc}")
-            console.print(
-                "\n[dim]Usage: /prompt <name> [context or file][/dim]"
-            )
-            return True
-
-        pparts = arg.split(maxsplit=1)
-        prompt_name = pparts[0]
-        context = pparts[1] if len(pparts) > 1 else ""
-
-        if context and Path(context.strip()).exists():
-            try:
-                context = Path(context.strip()).read_text(encoding="utf-8")
-            except Exception:
-                pass
-
-        prompt = get_prompt(prompt_name, context)
-        if prompt:
-            session.send(prompt)
-        else:
-            console.print(f"[red]Unknown prompt: {prompt_name}[/red]")
-
-    # ── Model Routing ──────────────────────────────────────────
-    elif command == "/route":
-        from model_router import ModelRouter
-
-        if not session._router:
-            session._router = ModelRouter(
-                config["ollama_url"], config["model"]
-            )
-        if arg:
-            session._router.set_mode(arg)
-        else:
-            console.print(
-                f"Current mode: [cyan]{session._router.mode}[/cyan]"
-            )
-            console.print("[dim]Modes: auto, fast, quality, manual[/dim]")
-
-    # ── Project Scan ───────────────────────────────────────────
-    elif command == "/scan":
-        from project_context import scan_project, display_project_scan
-
-        target = arg.strip() or "."
-        ctx = scan_project(Path(target).resolve())
-        display_project_scan(ctx)
-
-    # ── Watch Mode ─────────────────────────────────────────────
-    elif command == "/watch":
-        from watch_mode import watch_loop
-        from project_context import scan_project
-
-        target = arg.strip() or "."
-
-        def on_change(changes, cfg):
-            ctx = scan_project(Path(target).resolve())
-            if ctx.issues:
-                console.print(
-                    f"[yellow]⚠ {len(ctx.issues)} issues detected[/yellow]"
-                )
-                for issue in ctx.issues[:5]:
-                    console.print(f"  [dim]• {issue['message']}[/dim]")
-            for fpath, change_type in changes.items():
-                if change_type == "deleted":
-                    continue
-                info = ctx.files.get(
-                    fpath.replace("\\", "/")
-                )
-                if info and info.errors:
-                    console.print(
-                        f"[red]  ✗ {fpath}: {info.errors[0]}[/red]"
-                    )
-                elif info:
-                    console.print(f"[green]  ✓ {fpath} OK[/green]")
-
-        watch_loop(target, config, on_change)
-
-    # ── Undo/Redo ──────────────────────────────────────────────
-    elif command == "/undo":
-        if not hasattr(session, "_undo"):
-            from undo import UndoManager
-            session._undo = UndoManager(max_history=config.get("undo_max_history", 50))
-        messages = session._undo.undo()
-        if messages:
-            session.messages = messages
-
-    elif command == "/redo":
-        if not hasattr(session, "_undo"):
-            console.print("[yellow]Nothing to redo.[/yellow]")
-            return True
-        messages = session._undo.redo()
-        if messages:
-            session.messages = messages
-
-    elif command == "/retry":
-        if len(session.messages) >= 3:
-            if not hasattr(session, "_undo"):
-                from undo import UndoManager
-                session._undo = UndoManager(max_history=config.get("undo_max_history", 50))
-            session._undo.save_state(
-                session.messages, config["model"], "before retry"
-            )
-            last_user_msg = None
-            while len(session.messages) > 1:
-                msg = session.messages.pop()
-                if msg["role"] == "user":
-                    last_user_msg = msg["content"]
-                    break
-            if last_user_msg:
-                console.print("[yellow]🔄 Retrying...[/yellow]")
-                session.send(last_user_msg)
-        else:
-            console.print("[yellow]Nothing to retry.[/yellow]")
-
-    # ── Branching ──────────────────────────────────────────────
-    elif command == "/branch":
-        if not hasattr(session, "_undo"):
-            from undo import UndoManager
-            session._undo = UndoManager(max_history=config.get("undo_max_history", 50))
-        if arg:
-            session._undo.create_branch(
-                arg, session.messages, config["model"]
-            )
-        else:
-            session._undo.list_branches()
-
-    elif command == "/switch":
-        if not hasattr(session, "_undo"):
-            console.print(
-                "[yellow]No branches. Use /branch <name> first.[/yellow]"
-            )
-            return True
-        if arg:
-            messages = session._undo.switch_branch(arg)
-            if messages:
-                session.messages = messages
-        else:
-            session._undo.list_branches()
-
-    # ── Clipboard ──────────────────────────────────────────────
-    elif command == "/paste":
-        from clipboard import get_clipboard
-        content = get_clipboard()
-        if content:
-            console.print(f"[dim]📋 Pasted {len(content)} chars[/dim]")
-            prompt = f"{arg}\n\n```\n{content}\n```" if arg else content
-            session.send(prompt)
-        else:
-            console.print("[yellow]Clipboard is empty.[/yellow]")
-
-    elif command == "/copy":
-        from clipboard import set_clipboard
-        for msg in reversed(session.messages):
-            if msg["role"] == "assistant":
-                set_clipboard(msg["content"])
-                console.print("[green]Copied last response.[/green]")
-                break
-        else:
-            console.print("[yellow]No assistant response to copy.[/yellow]")
-
-    # ── Memory ─────────────────────────────────────────────────
-    elif command == "/remember":
-        from memory import add_decision, add_note, add_pattern, set_preference
-        if not arg:
-            console.print("[yellow]Usage:[/yellow]")
-            console.print("  /remember decision <text>")
-            console.print("  /remember note <text>")
-            console.print("  /remember pattern <text>")
-            console.print("  /remember pref <key> <value>")
-            return True
-
-        rparts = arg.split(maxsplit=1)
-        sub = rparts[0].lower()
-        text = rparts[1] if len(rparts) > 1 else ""
-
-        if sub == "decision":
-            add_decision(text)
-        elif sub == "note":
-            add_note(text)
-        elif sub == "pattern":
-            add_pattern(text)
-        elif sub == "pref":
-            kv = text.split(maxsplit=1)
-            if len(kv) == 2:
-                set_preference(kv[0], kv[1])
-            else:
-                console.print(
-                    "[yellow]Usage: /remember pref <key> <value>[/yellow]"
-                )
-        else:
-            add_note(arg)
-
-    elif command == "/memory":
-        from memory import display_memory, clear_memory
-        if arg == "clear":
-            clear_memory()
-        else:
-            display_memory()
-
-    # ── .aiignore ──────────────────────────────────────────────
-    elif command == "/aiignore":
-        from aiignore import create_default_aiignore
-        create_default_aiignore(Path.cwd())
-
-    # ── Metrics ────────────────────────────────────────────────
-    elif command == "/stats":
-        t = MetricsTracker()
-        t.show_stats()
-
-    # ── Project Review & Improve ───────────────────────────────
-    elif command == "/review-project":
-        from project_reviewer import review_project
-        target = arg.strip() or "."
-        review = review_project(target, config)
-        if review:
-            session._last_review = review
-            console.print(
-                "\n[dim]Use /improve to build from this review, "
-                "or /review-project <dir> to review another project.[/dim]"
-            )
-
-    elif command == "/suggest":
-        from project_reviewer import suggest_features
-        target = arg.strip() or "."
-        suggestions = suggest_features(target, config)
-        if suggestions:
-            session._last_suggestions = suggestions
-            console.print(
-                "\n[dim]Use /add-features to build selected features.[/dim]"
-            )
-
-    elif command == "/review-focus":
-        from project_reviewer import review_project
-        if not arg:
-            console.print("[yellow]Usage: /review-focus <area>[/yellow]")
-            console.print("[dim]Examples:[/dim]")
-            console.print("  /review-focus security")
-            console.print("  /review-focus performance")
-            console.print("  /review-focus error handling")
-            console.print("  /review-focus testing")
-            console.print("  /review-focus architecture")
-            console.print("  /review-focus accessibility")
-            console.print("  /review-focus API design")
-            return True
-        review_project(".", config, focus=arg)
-
-    elif command == "/improve":
-        from project_reviewer import review_to_plan
-        from planner import display_plan, save_plan
-        from builder import build_plan as run_build
-
-        if not session._last_review:
-            console.print(
-                "[yellow]No review loaded. Run /review-project first.[/yellow]"
-            )
-            return True
-
-        review = session._last_review
-        steps = review.get("improvement_plan", [])
-
-        if not steps:
-            console.print("[yellow]No improvement steps in the review.[/yellow]")
-            return True
-
-        console.print("\n[bold]Select improvements to apply:[/bold]\n")
-
-        for step in steps:
-            pri = step.get("priority", "medium")
-            pri_colors = {"high": "red", "medium": "yellow", "low": "green"}
-            color = pri_colors.get(pri, "white")
-            console.print(
-                f"  [{color}]{step.get('id', '?')}.[/] "
-                f"{step.get('title', 'Untitled')} [dim]({pri} priority)[/dim]"
-            )
-
-        console.print(
-            "\n[dim]Enter: numbers (1,2,3) | 'all' | 'high' | 'q' to cancel[/dim]"
-        )
-
-        selected = _prompt_selection(steps, key="id", allow_high=True)
-        if selected is None:
-            return True
-
-        console.print(
-            f"\n[green]Selected: {', '.join(str(s) for s in selected)}[/green]"
-        )
-
-        plan = review_to_plan(review, selected)
-        display_plan(plan)
-
-        build_it = console.input(
-            "\n[bold]Build these improvements? (y/n): [/bold]"
-        ).strip().lower()
-        if build_it in ("y", "yes"):
-            save_plan(plan)
-            session._current_plan = plan
-            set_auto_confirm(True)
-            try:
-                run_build(plan, config, output_dir=str(Path.cwd()))
-            finally:
-                set_auto_confirm(False)
-
-            # Remove completed steps from the cached review
-            remaining = [
-                s for s in review.get("improvement_plan", [])
-                if s.get("id") not in selected
-            ]
-            if remaining:
-                session._last_review["improvement_plan"] = remaining
-                console.print(
-                    f"[dim]{len(remaining)} improvement(s) remaining. "
-                    "Use /improve to continue, or /review-project to re-scan.[/dim]"
-                )
-            else:
-                session._last_review = None
-                console.print(
-                    "[green]✓ All selected improvements applied.[/green]\n"
-                    "[dim]Run /review-project to get a fresh analysis.[/dim]"
-                )
-
-    elif command == "/add-features":
-        from project_reviewer import features_to_plan
-        from planner import display_plan, save_plan
-        from builder import build_plan as run_build
-
-        if not session._last_suggestions:
-            console.print(
-                "[yellow]No suggestions loaded. Run /suggest first.[/yellow]"
-            )
-            return True
-
-        suggestions = session._last_suggestions
-        features = suggestions.get("suggested_features", [])
-
-        if not features:
-            console.print("[yellow]No features to add.[/yellow]")
-            return True
-
-        console.print("\n[bold]Select features to implement:[/bold]\n")
-
-        for i, feat in enumerate(features, 1):
-            effort = feat.get("effort", "?")
-            impact = feat.get("impact", "?")
-            console.print(
-                f"  [bold]{i}.[/bold] [cyan]{feat.get('title', 'Untitled')}[/cyan] "
-                f"[dim](effort: {effort}, impact: {impact})[/dim]"
-            )
-
-        console.print(
-            "\n[dim]Enter: numbers (1,2,3) | 'all' | 'q' to cancel[/dim]"
-        )
-
-        selected = _prompt_selection(
-            features, key=None, max_val=len(features)
-        )
-        if selected is None:
-            return True
-
-        console.print(
-            f"\n[green]Selected: {', '.join(str(s) for s in selected)}[/green]"
-        )
-
-        plan = features_to_plan(suggestions, selected)
-        display_plan(plan)
-
-        build_it = console.input(
-            "\n[bold]Build these features? (y/n): [/bold]"
-        ).strip().lower()
-        if build_it in ("y", "yes"):
-            save_plan(plan)
-            session._current_plan = plan
-            set_auto_confirm(True)
-            try:
-                run_build(plan, config, output_dir=str(Path.cwd()))
-            finally:
-                set_auto_confirm(False)
-
-    # ── Auto ───────────────────────────────────────────────────
-    elif command == "/auto":
-        _handle_auto(arg, config, session)
-
-    # ── Display / Verbosity ────────────────────────────────────
-    elif command == "/verbose":
-        from display import set_verbosity, display_status
-        if arg:
-            set_verbosity(arg)
-        display_status()
-
-    elif command == "/toggle":
-        from display import set_toggle
-
-        valid_toggles = {
-            "thinking", "previews", "diffs",
-            "metrics", "scan", "tools", "streaming",
-        }
-
-        if not arg:
-            console.print("[yellow]Usage: /toggle <setting>[/yellow]")
-            console.print(
-                f"[dim]Settings: {', '.join(sorted(valid_toggles))}[/dim]"
-            )
-            return True
-
-        tparts = arg.strip().split(maxsplit=1)
-        name = tparts[0].lower()
-
-        if name not in valid_toggles:
-            console.print(
-                f"[red]Unknown setting: {name}[/red]\n"
-                f"[dim]Options: {', '.join(sorted(valid_toggles))}[/dim]"
-            )
-            return True
-
-        if len(tparts) > 1:
-            value = tparts[1].lower() in ("on", "true", "1", "yes")
-            new_val = set_toggle(name, value)
-        else:
-            new_val = set_toggle(name)
-
-        status = "[green]ON[/green]" if new_val else "[red]OFF[/red]"
-        console.print(f"[cyan]{name}[/cyan] → {status}")
-
-    elif command == "/quiet":
-        from display import set_verbosity
-        set_verbosity("quiet")
-        console.print("[dim]Quiet mode — minimal output[/dim]")
-
-    elif command == "/normal":
-        from display import set_verbosity
-        set_verbosity("normal")
-        console.print("Normal verbosity restored.")
-
-    # ── Fix Fences ─────────────────────────────────────────────
-    elif command == "/fix-fences":
-        _handle_fix_fences(arg)
-
-    # ── Adaptive Learning ──────────────────────────────────────
-    elif command == "/adaptive":
-        _handle_adaptive(arg, session, config)
-
-    elif command == "/feedback":
-        _handle_feedback(arg, session)
-
-    # ── Help ───────────────────────────────────────────────────
-    elif command == "/help":
-        _show_help()
-
+                if build_it in ("y", "yes"):
+                    from planning.builder import build_plan
+                    set_auto_confirm(True)
+                    try:
+                        build_plan(plan, ctx.config)
+                    finally:
+                        set_auto_confirm(False)
     else:
-        console.print(
-            f"[red]Unknown command: {command}[/red] — try /help"
+        ctx.console.print(f"[red]Unknown template: {template_name}[/red]")
+
+
+@command("/review", description="AI reviews current plan", category="Planning")
+def cmd_review(ctx: CommandContext):
+    if not ctx.session._current_plan:
+        ctx.console.print("[yellow]No plan loaded. Use /plan first.[/yellow]")
+        return
+    plan = ctx.session._current_plan
+    ctx.session.send(
+        f"Review this project plan and suggest improvements:\n"
+        f"```json\n{json.dumps(plan, indent=2)}\n```\n\n"
+        f"Consider: missing steps, security, architecture, "
+        f"edge cases, testing."
+    )
+
+
+@command("/revise", description="Update plan", category="Planning")
+def cmd_revise(ctx: CommandContext):
+    from planning.planner import PLAN_SYSTEM_PROMPT, display_plan
+
+    if not ctx.session._current_plan:
+        ctx.console.print("[yellow]No plan loaded. Use /plan first.[/yellow]")
+        return
+    if not ctx.arg:
+        ctx.console.print("[yellow]Usage: /revise <what to change>[/yellow]")
+        return
+
+    plan = ctx.session._current_plan
+    revise_prompt = (
+        f"Current plan:\n"
+        f"```json\n{json.dumps(plan, indent=2)}\n```\n\n"
+        f"Revise based on: {ctx.arg}\n\n"
+        f"Respond with the COMPLETE updated JSON plan."
+    )
+
+    url = f"{ctx.config['ollama_url']}/api/chat"
+    payload = {
+        "model": ctx.config["model"],
+        "messages": [
+            {"role": "system", "content": PLAN_SYSTEM_PROMPT},
+            {"role": "user", "content": revise_prompt},
+        ],
+        "stream": True,
+        "options": {
+            "temperature": 0.3,
+            "num_ctx": ctx.config.get("num_ctx", 32768),
+        },
+    }
+
+    ctx.console.print("\n[bold yellow]Revising plan...[/bold yellow]\n")
+    full_response = ""
+    try:
+        with httpx.stream(
+            "POST", url, json=payload, timeout=120.0
+        ) as resp:
+            for line in resp.iter_lines():
+                if line:
+                    data = json.loads(line)
+                    chunk = data.get("message", {}).get("content", "")
+                    if chunk:
+                        full_response += chunk
+                        print(chunk, end="", flush=True)
+                    if data.get("done"):
+                        break
+    except Exception as e:
+        ctx.console.print(f"\n[red]Error: {e}[/red]")
+        return
+
+    print()
+    try:
+        json_match = re.search(r"\{.*\}", full_response, re.DOTALL)
+        if json_match:
+            revised = json.loads(json_match.group())
+            ctx.session._current_plan = revised
+            display_plan(revised)
+            ctx.console.print(
+                "[green]Plan revised! Use /build to execute.[/green]"
+            )
+    except Exception:
+        ctx.console.print("[red]Could not parse revised plan.[/red]")
+
+
+# ── Git ────────────────────────────────────────────────────────
+
+@command("/git", description="Git operations", category="Git")
+def cmd_git(ctx: CommandContext):
+    from utils.git_integration import (
+        is_git_repo, init_repo, show_diff, get_log,
+        list_checkpoints, rollback_to_checkpoint,
+        rollback_last_commit, run_git, get_full_diff,
+    )
+
+    subcmd = ctx.arg.split(maxsplit=1)
+    sub = subcmd[0] if subcmd else "status"
+    sub_arg = subcmd[1] if len(subcmd) > 1 else ""
+
+    if sub == "init":
+        init_repo(os.getcwd())
+    elif sub == "diff":
+        show_diff(os.getcwd())
+    elif sub == "log":
+        log = get_log(os.getcwd())
+        if log:
+            ctx.console.print(log)
+        else:
+            ctx.console.print("[dim]No git history.[/dim]")
+    elif sub == "undo":
+        rollback_last_commit(os.getcwd())
+    elif sub == "checkpoints":
+        cps = list_checkpoints(os.getcwd())
+        if cps:
+            for cp in cps:
+                ctx.console.print(f"  {cp}")
+        else:
+            ctx.console.print("[dim]No checkpoints.[/dim]")
+    elif sub == "rollback":
+        if sub_arg:
+            rollback_to_checkpoint(os.getcwd(), sub_arg)
+        else:
+            ctx.console.print(
+                "[yellow]Usage: /git rollback <checkpoint-tag>[/yellow]"
+            )
+    elif sub == "commit":
+        diff = get_full_diff(os.getcwd())
+        if diff:
+            if sub_arg:
+                run_git("add -A", cwd=os.getcwd())
+                run_git(f'commit -m "{sub_arg}"', cwd=os.getcwd())
+                ctx.console.print("[green]Committed.[/green]")
+            else:
+                ctx.session.send(
+                    "Generate a conventional commit message for "
+                    f"this diff:\n\n```diff\n{diff[:3000]}\n```"
+                )
+        else:
+            ctx.console.print("[dim]No changes to commit.[/dim]")
+    elif sub == "status":
+        result = run_git("status --short", cwd=os.getcwd())
+        if result and result.get("stdout"):
+            ctx.console.print(result["stdout"])
+        else:
+            ctx.console.print("[dim]Clean working tree.[/dim]")
+    else:
+        ctx.console.print(
+            "[yellow]Git: init, status, diff, log, commit, "
+            "undo, checkpoints, rollback[/yellow]"
         )
 
-    return True
+
+# ── Sessions ───────────────────────────────────────────────────
+
+@command("/load", description="Load conversation", category="Sessions")
+def cmd_load(ctx: CommandContext):
+    from core.session_manager import load_session, list_sessions
+
+    if not ctx.arg:
+        list_sessions()
+        ctx.console.print("[dim]Usage: /load <number or name>[/dim]")
+        return
+    result = load_session(ctx.arg)
+    if result:
+        ctx.session.messages, model_info = result
+        if "model" in model_info:
+            ctx.config["model"] = model_info["model"]
+            ctx.session.config["model"] = model_info["model"]
+
+
+@command("/sessions", description="List saved sessions", category="Sessions")
+def cmd_sessions(ctx: CommandContext):
+    from core.session_manager import list_sessions
+    list_sessions()
+
+
+@command("/search", description="Search session history", category="Sessions")
+def cmd_search(ctx: CommandContext):
+    from core.session_manager import search_sessions
+    if ctx.arg:
+        search_sessions(ctx.arg)
+    else:
+        ctx.console.print("[yellow]Usage: /search <query>[/yellow]")
+
+
+# ── Prompts ────────────────────────────────────────────────────
+
+@command("/prompt", description="Prompt templates", category="Tools")
+def cmd_prompt(ctx: CommandContext):
+    from llm.prompts import get_prompt, list_prompts
+
+    if not ctx.arg:
+        prompts = list_prompts()
+        ctx.console.print("\n[bold]Prompt Templates:[/bold]\n")
+        for name, desc in prompts.items():
+            ctx.console.print(f"  [cyan]{name:15}[/cyan] {desc}")
+        ctx.console.print(
+            "\n[dim]Usage: /prompt <name> [context or file][/dim]"
+        )
+        return
+
+    pparts = ctx.arg.split(maxsplit=1)
+    prompt_name = pparts[0]
+    context = pparts[1] if len(pparts) > 1 else ""
+
+    if context and Path(context.strip()).exists():
+        try:
+            context = Path(context.strip()).read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    prompt = get_prompt(prompt_name, context)
+    if prompt:
+        ctx.session.send(prompt)
+    else:
+        ctx.console.print(f"[red]Unknown prompt: {prompt_name}[/red]")
+
+
+# ── Model Routing ──────────────────────────────────────────────
+
+@command("/route", description="Model routing mode", category="Core")
+def cmd_route(ctx: CommandContext):
+    from llm.model_router import ModelRouter
+
+    if not ctx.session._router:
+        ctx.session._router = ModelRouter(
+            ctx.config["ollama_url"], ctx.config["model"]
+        )
+    if ctx.arg:
+        ctx.session._router.set_mode(ctx.arg)
+    else:
+        ctx.console.print(
+            f"Current mode: [cyan]{ctx.session._router.mode}[/cyan]"
+        )
+        ctx.console.print("[dim]Modes: auto, fast, quality, manual[/dim]")
+
+
+# ── Project Scan ───────────────────────────────────────────────
+
+@command("/scan", description="Full project analysis", category="Tools")
+def cmd_scan(ctx: CommandContext):
+    from planning.project_context import scan_project, display_project_scan
+
+    target = ctx.arg.strip() or "."
+    scan_ctx = scan_project(Path(target).resolve())
+    display_project_scan(scan_ctx)
+
+
+# ── Watch Mode ─────────────────────────────────────────────────
+
+@command("/watch", description="Monitor files for changes", category="Tools")
+def cmd_watch(ctx: CommandContext):
+    from utils.watch_mode import watch_loop
+
+    target = ctx.arg.strip() or "."
+
+    def on_change(changes, cfg):
+        try:
+            from planning.project_context import scan_project_cached
+            scan_ctx = scan_project_cached(Path(target).resolve(), changed_files=list(changes.keys()))
+        except ImportError:
+            from planning.project_context import scan_project
+            scan_ctx = scan_project(Path(target).resolve())
+
+        if scan_ctx.issues:
+            ctx.console.print(
+                f"[yellow]Warning: {len(scan_ctx.issues)} issues detected[/yellow]"
+            )
+            for issue in scan_ctx.issues[:5]:
+                ctx.console.print(f"  [dim]- {issue['message']}[/dim]")
+        for fpath, change_type in changes.items():
+            if change_type == "deleted":
+                continue
+            info = scan_ctx.files.get(
+                fpath.replace("\\", "/")
+            )
+            if info and info.errors:
+                ctx.console.print(
+                    f"[red]  x {fpath}: {info.errors[0]}[/red]"
+                )
+            elif info:
+                ctx.console.print(f"[green]  ok {fpath}[/green]")
+
+    watch_loop(target, ctx.config, on_change)
+
+
+# ── Undo/Redo ──────────────────────────────────────────────────
+
+@command("/undo", description="Undo last AI response", category="Undo")
+def cmd_undo(ctx: CommandContext):
+    if not hasattr(ctx.session, "_undo"):
+        from core.undo import UndoManager
+        ctx.session._undo = UndoManager(max_history=ctx.config.get("undo_max_history", 50))
+    messages = ctx.session._undo.undo()
+    if messages:
+        ctx.session.messages = messages
+
+
+@command("/redo", description="Redo undone response", category="Undo")
+def cmd_redo(ctx: CommandContext):
+    if not hasattr(ctx.session, "_undo"):
+        ctx.console.print("[yellow]Nothing to redo.[/yellow]")
+        return
+    messages = ctx.session._undo.redo()
+    if messages:
+        ctx.session.messages = messages
+
+
+@command("/retry", description="Re-generate last response", category="Undo")
+def cmd_retry(ctx: CommandContext):
+    if len(ctx.session.messages) >= 3:
+        if not hasattr(ctx.session, "_undo"):
+            from core.undo import UndoManager
+            ctx.session._undo = UndoManager(max_history=ctx.config.get("undo_max_history", 50))
+        ctx.session._undo.save_state(
+            ctx.session.messages, ctx.config["model"], "before retry"
+        )
+        last_user_msg = None
+        while len(ctx.session.messages) > 1:
+            msg = ctx.session.messages.pop()
+            if msg["role"] == "user":
+                last_user_msg = msg["content"]
+                break
+        if last_user_msg:
+            ctx.console.print("[yellow]Retrying...[/yellow]")
+            ctx.session.send(last_user_msg)
+    else:
+        ctx.console.print("[yellow]Nothing to retry.[/yellow]")
+
+
+# ── Branching ──────────────────────────────────────────────────
+
+@command("/branch", description="Save conversation branch", category="Undo")
+def cmd_branch(ctx: CommandContext):
+    if not hasattr(ctx.session, "_undo"):
+        from core.undo import UndoManager
+        ctx.session._undo = UndoManager(max_history=ctx.config.get("undo_max_history", 50))
+    if ctx.arg:
+        ctx.session._undo.create_branch(
+            ctx.arg, ctx.session.messages, ctx.config["model"]
+        )
+    else:
+        ctx.session._undo.list_branches()
+
+
+@command("/switch", description="Switch to branch", category="Undo")
+def cmd_switch(ctx: CommandContext):
+    if not hasattr(ctx.session, "_undo"):
+        ctx.console.print(
+            "[yellow]No branches. Use /branch <name> first.[/yellow]"
+        )
+        return
+    if ctx.arg:
+        messages = ctx.session._undo.switch_branch(ctx.arg)
+        if messages:
+            ctx.session.messages = messages
+    else:
+        ctx.session._undo.list_branches()
+
+
+# ── Clipboard ──────────────────────────────────────────────────
+
+@command("/paste", description="Paste clipboard + optional prompt", category="Clipboard")
+def cmd_paste(ctx: CommandContext):
+    from utils.clipboard import get_clipboard
+    content = get_clipboard()
+    if content:
+        ctx.console.print(f"[dim]Pasted {len(content)} chars[/dim]")
+        prompt = f"{ctx.arg}\n\n```\n{content}\n```" if ctx.arg else content
+        ctx.session.send(prompt)
+    else:
+        ctx.console.print("[yellow]Clipboard is empty.[/yellow]")
+
+
+@command("/copy", description="Copy last AI response", category="Clipboard")
+def cmd_copy(ctx: CommandContext):
+    from utils.clipboard import set_clipboard
+    for msg in reversed(ctx.session.messages):
+        if msg["role"] == "assistant":
+            set_clipboard(msg["content"])
+            ctx.console.print("[green]Copied last response.[/green]")
+            break
+    else:
+        ctx.console.print("[yellow]No assistant response to copy.[/yellow]")
+
+
+# ── Memory ─────────────────────────────────────────────────────
+
+@command("/remember", description="Record decisions/notes/patterns", category="Memory")
+def cmd_remember(ctx: CommandContext):
+    from core.memory import add_decision, add_note, add_pattern, set_preference
+    if not ctx.arg:
+        ctx.console.print("[yellow]Usage:[/yellow]")
+        ctx.console.print("  /remember decision <text>")
+        ctx.console.print("  /remember note <text>")
+        ctx.console.print("  /remember pattern <text>")
+        ctx.console.print("  /remember pref <key> <value>")
+        return
+
+    rparts = ctx.arg.split(maxsplit=1)
+    sub = rparts[0].lower()
+    text = rparts[1] if len(rparts) > 1 else ""
+
+    if sub == "decision":
+        add_decision(text)
+    elif sub == "note":
+        add_note(text)
+    elif sub == "pattern":
+        add_pattern(text)
+    elif sub == "pref":
+        kv = text.split(maxsplit=1)
+        if len(kv) == 2:
+            set_preference(kv[0], kv[1])
+        else:
+            ctx.console.print(
+                "[yellow]Usage: /remember pref <key> <value>[/yellow]"
+            )
+    else:
+        add_note(ctx.arg)
+
+
+@command("/memory", description="View/clear project memory", category="Memory")
+def cmd_memory(ctx: CommandContext):
+    from core.memory import display_memory, clear_memory
+    if ctx.arg == "clear":
+        clear_memory()
+    else:
+        display_memory()
+
+
+# ── .aiignore ──────────────────────────────────────────────────
+
+@command("/aiignore", description="Create .aiignore file", category="Other")
+def cmd_aiignore(ctx: CommandContext):
+    from utils.aiignore import create_default_aiignore
+    create_default_aiignore(Path.cwd())
+
+
+# ── Metrics ────────────────────────────────────────────────────
+
+@command("/stats", description="Performance metrics", category="Tools")
+def cmd_stats(ctx: CommandContext):
+    t = MetricsTracker()
+    t.show_stats()
+
+
+# ── Project Review & Improve ───────────────────────────────────
+
+@command("/review-project", description="Full project review", category="Review")
+def cmd_review_project(ctx: CommandContext):
+    from planning.project_reviewer import review_project
+    target = ctx.arg.strip() or "."
+    review = review_project(target, ctx.config)
+    if review:
+        ctx.session._last_review = review
+        ctx.console.print(
+            "\n[dim]Use /improve to build from this review, "
+            "or /review-project <dir> to review another project.[/dim]"
+        )
+
+
+@command("/suggest", description="AI suggests new features", category="Review")
+def cmd_suggest(ctx: CommandContext):
+    from planning.project_reviewer import suggest_features
+    target = ctx.arg.strip() or "."
+    suggestions = suggest_features(target, ctx.config)
+    if suggestions:
+        ctx.session._last_suggestions = suggestions
+        ctx.console.print(
+            "\n[dim]Use /add-features to build selected features.[/dim]"
+        )
+
+
+@command("/review-focus", description="Focused review (security, performance, etc.)", category="Review")
+def cmd_review_focus(ctx: CommandContext):
+    from planning.project_reviewer import review_project
+    if not ctx.arg:
+        ctx.console.print("[yellow]Usage: /review-focus <area>[/yellow]")
+        ctx.console.print("[dim]Examples:[/dim]")
+        ctx.console.print("  /review-focus security")
+        ctx.console.print("  /review-focus performance")
+        ctx.console.print("  /review-focus error handling")
+        ctx.console.print("  /review-focus testing")
+        ctx.console.print("  /review-focus architecture")
+        ctx.console.print("  /review-focus accessibility")
+        ctx.console.print("  /review-focus API design")
+        return
+    review_project(".", ctx.config, focus=ctx.arg)
+
+
+@command("/improve", description="Build improvements from last review", category="Review")
+def cmd_improve(ctx: CommandContext):
+    from planning.project_reviewer import review_to_plan
+    from planning.planner import display_plan, save_plan
+    from planning.builder import build_plan as run_build
+
+    if not ctx.session._last_review:
+        ctx.console.print(
+            "[yellow]No review loaded. Run /review-project first.[/yellow]"
+        )
+        return
+
+    review = ctx.session._last_review
+    steps = review.get("improvement_plan", [])
+
+    if not steps:
+        ctx.console.print("[yellow]No improvement steps in the review.[/yellow]")
+        return
+
+    ctx.console.print("\n[bold]Select improvements to apply:[/bold]\n")
+
+    for step in steps:
+        pri = step.get("priority", "medium")
+        pri_colors = {"high": "red", "medium": "yellow", "low": "green"}
+        color = pri_colors.get(pri, "white")
+        ctx.console.print(
+            f"  [{color}]{step.get('id', '?')}.[/] "
+            f"{step.get('title', 'Untitled')} [dim]({pri} priority)[/dim]"
+        )
+
+    ctx.console.print(
+        "\n[dim]Enter: numbers (1,2,3) | 'all' | 'high' | 'q' to cancel[/dim]"
+    )
+
+    selected = _prompt_selection(steps, key="id", allow_high=True)
+    if selected is None:
+        return
+
+    ctx.console.print(
+        f"\n[green]Selected: {', '.join(str(s) for s in selected)}[/green]"
+    )
+
+    plan = review_to_plan(review, selected)
+    display_plan(plan)
+
+    build_it = ctx.console.input(
+        "\n[bold]Build these improvements? (y/n): [/bold]"
+    ).strip().lower()
+    if build_it in ("y", "yes"):
+        save_plan(plan)
+        ctx.session._current_plan = plan
+        set_auto_confirm(True)
+        try:
+            run_build(plan, ctx.config, output_dir=str(Path.cwd()))
+        finally:
+            set_auto_confirm(False)
+
+        remaining = [
+            s for s in review.get("improvement_plan", [])
+            if s.get("id") not in selected
+        ]
+        if remaining:
+            ctx.session._last_review["improvement_plan"] = remaining
+            ctx.console.print(
+                f"[dim]{len(remaining)} improvement(s) remaining. "
+                "Use /improve to continue, or /review-project to re-scan.[/dim]"
+            )
+        else:
+            ctx.session._last_review = None
+            ctx.console.print(
+                "[green]All selected improvements applied.[/green]\n"
+                "[dim]Run /review-project to get a fresh analysis.[/dim]"
+            )
+
+
+@command("/add-features", description="Build features from last /suggest", category="Review")
+def cmd_add_features(ctx: CommandContext):
+    from planning.project_reviewer import features_to_plan
+    from planning.planner import display_plan, save_plan
+    from planning.builder import build_plan as run_build
+
+    if not ctx.session._last_suggestions:
+        ctx.console.print(
+            "[yellow]No suggestions loaded. Run /suggest first.[/yellow]"
+        )
+        return
+
+    suggestions = ctx.session._last_suggestions
+    features = suggestions.get("suggested_features", [])
+
+    if not features:
+        ctx.console.print("[yellow]No features to add.[/yellow]")
+        return
+
+    ctx.console.print("\n[bold]Select features to implement:[/bold]\n")
+
+    for i, feat in enumerate(features, 1):
+        effort = feat.get("effort", "?")
+        impact = feat.get("impact", "?")
+        ctx.console.print(
+            f"  [bold]{i}.[/bold] [cyan]{feat.get('title', 'Untitled')}[/cyan] "
+            f"[dim](effort: {effort}, impact: {impact})[/dim]"
+        )
+
+    ctx.console.print(
+        "\n[dim]Enter: numbers (1,2,3) | 'all' | 'q' to cancel[/dim]"
+    )
+
+    selected = _prompt_selection(
+        features, key=None, max_val=len(features)
+    )
+    if selected is None:
+        return
+
+    ctx.console.print(
+        f"\n[green]Selected: {', '.join(str(s) for s in selected)}[/green]"
+    )
+
+    plan = features_to_plan(suggestions, selected)
+    display_plan(plan)
+
+    build_it = ctx.console.input(
+        "\n[bold]Build these features? (y/n): [/bold]"
+    ).strip().lower()
+    if build_it in ("y", "yes"):
+        save_plan(plan)
+        ctx.session._current_plan = plan
+        set_auto_confirm(True)
+        try:
+            run_build(plan, ctx.config, output_dir=str(Path.cwd()))
+        finally:
+            set_auto_confirm(False)
+
+
+# ── Auto ───────────────────────────────────────────────────────
+
+@command("/auto", description="Auto-apply settings", category="Auto")
+def cmd_auto(ctx: CommandContext):
+    _handle_auto(ctx.arg, ctx.config, ctx.session)
+
+
+# ── Display / Verbosity ────────────────────────────────────────
+
+@command("/verbose", description="Set verbosity level", category="Display")
+def cmd_verbose(ctx: CommandContext):
+    from core.display import set_verbosity, display_status
+    if ctx.arg:
+        set_verbosity(ctx.arg)
+    display_status()
+
+
+@command("/toggle", description="Toggle display settings", category="Display")
+def cmd_toggle(ctx: CommandContext):
+    from core.display import set_toggle
+
+    valid_toggles = {
+        "thinking", "previews", "diffs",
+        "metrics", "scan", "tools", "streaming",
+    }
+
+    if not ctx.arg:
+        ctx.console.print("[yellow]Usage: /toggle <setting>[/yellow]")
+        ctx.console.print(
+            f"[dim]Settings: {', '.join(sorted(valid_toggles))}[/dim]"
+        )
+        return
+
+    tparts = ctx.arg.strip().split(maxsplit=1)
+    name = tparts[0].lower()
+
+    if name not in valid_toggles:
+        ctx.console.print(
+            f"[red]Unknown setting: {name}[/red]\n"
+            f"[dim]Options: {', '.join(sorted(valid_toggles))}[/dim]"
+        )
+        return
+
+    if len(tparts) > 1:
+        value = tparts[1].lower() in ("on", "true", "1", "yes")
+        new_val = set_toggle(name, value)
+    else:
+        new_val = set_toggle(name)
+
+    status = "[green]ON[/green]" if new_val else "[red]OFF[/red]"
+    ctx.console.print(f"[cyan]{name}[/cyan] → {status}")
+
+
+@command("/quiet", description="Minimal output", category="Display")
+def cmd_quiet(ctx: CommandContext):
+    from core.display import set_verbosity
+    set_verbosity("quiet")
+    ctx.console.print("[dim]Quiet mode — minimal output[/dim]")
+
+
+@command("/normal", description="Default output", category="Display")
+def cmd_normal(ctx: CommandContext):
+    from core.display import set_verbosity
+    set_verbosity("normal")
+    ctx.console.print("Normal verbosity restored.")
+
+
+# ── Fix Fences ─────────────────────────────────────────────────
+
+@command("/fix-fences", description="Remove accidental markdown fences from files", category="Other")
+def cmd_fix_fences(ctx: CommandContext):
+    _handle_fix_fences(ctx.arg)
+
+
+# ── Adaptive Learning ──────────────────────────────────────────
+
+@command("/adaptive", description="Adaptive ML routing", category="Adaptive")
+def cmd_adaptive(ctx: CommandContext):
+    _handle_adaptive(ctx.arg, ctx.session, ctx.config)
+
+
+@command("/feedback", description="Rate last response", category="Adaptive")
+def cmd_feedback(ctx: CommandContext):
+    _handle_feedback(ctx.arg, ctx.session)
+
+
+# ── Help ───────────────────────────────────────────────────────
+
+@command("/help", description="Show help", category="Core")
+def cmd_help(ctx: CommandContext):
+    _show_help()
+
+
+# ── Dispatch shim ─────────────────────────────────────────────
+
+def handle_command(cmd: str, session: ChatSession, config: dict) -> bool:
+    """Thin wrapper: build a CommandContext and dispatch."""
+    _ensure_session_attrs(session)
+    ctx = CommandContext(
+        session=session,
+        config=config,
+        console=console,
+        arg="",
+        raw_cmd=cmd,
+    )
+    return registry.dispatch(cmd, ctx)
 
 
 # ── Helper: Selection Prompt ───────────────────────────────────
@@ -1033,7 +1143,6 @@ def _handle_auto(arg: str, config: dict, session: ChatSession):
         config.update(settings)
         session.config.update(settings)
         set_tool_config(config)
-        # Sync auto_confirm with the auto_apply setting
         if settings.get("auto_apply") or settings.get("auto_run_commands"):
             set_auto_confirm(True)
         elif not settings.get("auto_apply", config.get("auto_apply", False)):
@@ -1042,7 +1151,7 @@ def _handle_auto(arg: str, config: dict, session: ChatSession):
     if mode == "on":
         _apply({"auto_apply": True, "auto_apply_fixes": True})
         console.print(
-            "[green]✓ Auto-apply ON for files and fixes[/green]"
+            "[green]Auto-apply ON for files and fixes[/green]"
         )
         console.print(
             "[dim]Large changes still require confirmation. "
@@ -1058,18 +1167,18 @@ def _handle_auto(arg: str, config: dict, session: ChatSession):
         })
         set_auto_confirm(False)
         console.print(
-            "[green]✓ All auto-apply OFF — manual confirmations[/green]"
+            "[green]All auto-apply OFF — manual confirmations[/green]"
         )
 
     elif mode == "all":
         console.print(
             Panel.fit(
-                "[bold red]⚠ YOLO MODE[/bold red]\n\n"
+                "[bold red]YOLO MODE[/bold red]\n\n"
                 "This will:\n"
-                "• Auto-apply ALL file changes without asking\n"
-                "• Auto-apply ALL error fixes without asking\n"
-                "• Auto-run shell commands without asking\n"
-                "• Skip confirmation even for large changes\n\n"
+                "- Auto-apply ALL file changes without asking\n"
+                "- Auto-apply ALL error fixes without asking\n"
+                "- Auto-run shell commands without asking\n"
+                "- Skip confirmation even for large changes\n\n"
                 "[dim]Git checkpoints are still created for rollback.[/dim]",
                 border_style="red",
             )
@@ -1086,7 +1195,7 @@ def _handle_auto(arg: str, config: dict, session: ChatSession):
             })
             set_auto_confirm(True)
             console.print(
-                "[red]🚀 YOLO MODE ENABLED — everything auto-applied[/red]"
+                "[red]YOLO MODE ENABLED — everything auto-applied[/red]"
             )
             console.print(
                 "[dim]Use /auto safe to go back. "
@@ -1098,7 +1207,7 @@ def _handle_auto(arg: str, config: dict, session: ChatSession):
     elif mode == "fixes":
         _apply({"auto_apply_fixes": True})
         console.print(
-            "[green]✓ Auto-apply fixes ON "
+            "[green]Auto-apply fixes ON "
             "(file changes still require confirmation)[/green]"
         )
 
@@ -1146,7 +1255,7 @@ def _handle_fix_fences(arg: str):
                 cleaned = "\n".join(lines).strip() + "\n"
                 fpath.write_text(cleaned, encoding="utf-8")
                 console.print(
-                    f"  [green]✓ Fixed: {rel}[/green] "
+                    f"  [green]Fixed: {rel}[/green] "
                     f"[dim](removed '{first_line}')[/dim]"
                 )
                 fixed += 1
@@ -1171,12 +1280,12 @@ def _handle_adaptive(arg: str, session, config: dict):
 
     if sub == "on":
         try:
-            from adaptive_engine import AdaptiveEngine
-            from adaptive_seed import seed_engine
+            from adaptive.adaptive_engine import AdaptiveEngine
+            from adaptive.adaptive_seed import seed_engine
 
             _ensure_session_attrs(session)
             if session._router is None:
-                from model_router import ModelRouter
+                from llm.model_router import ModelRouter
                 session._router = ModelRouter(
                     config.get("ollama_url", "http://localhost:11434"),
                     config.get("model", "qwen2.5-coder:14b"),
@@ -1326,12 +1435,10 @@ def _handle_feedback(arg: str, session):
 
     _ensure_session_attrs(session)
 
-    # Record in outcome tracker
     updated = False
     if hasattr(session, "_outcome_tracker") and session._outcome_tracker:
         updated = session._outcome_tracker.record_feedback(feedback)
 
-    # Record in adaptive engine via router
     if (
         session._router
         and session._router._adaptive_engine is not None
@@ -1351,145 +1458,41 @@ def _handle_feedback(arg: str, session):
         )
 
 
-# ── Help Text ──────────────────────────────────────────────────
+# ── Help Text (auto-generated from registry) ──────────────────
 
 def _show_help():
-    console.print(Markdown("""
-## Chat
-| Command | Description |
-|---|---|
-| `/quit` | Exit |
-| `/reset` | Clear conversation |
-| `/compact` | Smart-compress context |
-| `/model <name>` | Switch model |
-| `/models` | List available models |
-| `/route [auto/fast/quality/manual]` | Model routing mode |
-| `/tokens` | Context usage estimate |
-| `/cd <dir>` | Change directory |
-| `/config [key value]` | View/set config |
+    """Generate help text from the command registry."""
+    cats = registry.categories()
 
-## Planning & Building
-| Command | Description |
-|---|---|
-| `/plan <desc>` | Generate project plan |
-| `/template [name]` | Project templates |
-| `/review` | AI reviews current plan |
-| `/revise <feedback>` | Update plan |
-| `/build [name]` | Execute plan with auto-test |
-| `/build --resume` | Resume interrupted build |
-| `/plans` | List saved plans |
+    # Define display order for categories
+    cat_order = [
+        "Core", "Planning", "Git", "Sessions", "Tools",
+        "Undo", "Clipboard", "Memory", "Review", "Auto",
+        "Display", "Context", "Adaptive", "Other",
+    ]
 
-## Git
-| Command | Description |
-|---|---|
-| `/git init` | Initialize repo |
-| `/git status` | Show status |
-| `/git diff` | Show changes |
-| `/git log` | Recent history |
-| `/git commit [msg]` | Commit (AI msg if omitted) |
-| `/git undo` | Undo last commit |
-| `/git checkpoints` | List checkpoints |
-| `/git rollback <tag>` | Rollback to checkpoint |
+    lines = []
+    for cat_name in cat_order:
+        entries = cats.get(cat_name)
+        if not entries:
+            continue
+        lines.append(f"## {cat_name}")
+        lines.append("| Command | Description |")
+        lines.append("|---|---|")
+        for entry in entries:
+            aliases = ""
+            if entry.aliases:
+                aliases = " (" + ", ".join(entry.aliases) + ")"
+            lines.append(f"| `{entry.name}`{aliases} | {entry.description} |")
+        lines.append("")
 
-## Sessions
-| Command | Description |
-|---|---|
-| `/save [name]` | Save config (no arg) or session (with name) |
-| `/load <#/name>` | Load conversation |
-| `/sessions` | List saved sessions |
-| `/search <query>` | Search session history |
+    # Append tips
+    lines.append("## Tips")
+    lines.append("- End line with `\\\\` for multi-line input")
+    lines.append("- Pipe: `type file.py | python cli.py \"review\"`")
+    lines.append("- File arg: `python cli.py -f main.py \"find bugs\"`")
 
-## Tools
-| Command | Description |
-|---|---|
-| `/prompt [name]` | Prompt templates (review, test, debug...) |
-| `/scan [dir]` | Full project analysis |
-| `/watch [dir]` | Monitor files for changes |
-| `/stats` | Performance metrics |
-
-## Undo & Branching
-| Command | Description |
-|---|---|
-| `/undo` | Undo last AI response |
-| `/redo` | Redo undone response |
-| `/retry` | Re-generate last response |
-| `/branch <name>` | Save conversation branch |
-| `/switch <name>` | Switch to branch |
-
-## Clipboard
-| Command | Description |
-|---|---|
-| `/paste [prompt]` | Paste clipboard + optional prompt |
-| `/copy` | Copy last AI response |
-
-## Memory
-| Command | Description |
-|---|---|
-| `/remember decision <text>` | Record architectural decision |
-| `/remember note <text>` | Save a note |
-| `/remember pattern <text>` | Record coding convention |
-| `/remember pref <key> <val>` | Set project preference |
-| `/memory` | View all project memory |
-| `/memory clear` | Clear memory |
-
-## Project Review & Improvement
-| Command | Description |
-|---|---|
-| `/review-project [dir]` | Full project review (quality, issues, plan) |
-| `/review-focus <area>` | Focused review (security, performance, etc.) |
-| `/suggest [dir]` | AI suggests new features |
-| `/improve` | Build improvements from last review |
-| `/add-features` | Build features from last /suggest |
-
-## Auto-Apply
-| Command | Description |
-|---|---|
-| `/auto` | Show current auto-apply settings |
-| `/auto on` | Auto-apply files + fixes (confirm large changes) |
-| `/auto off` | Manual confirmation for everything |
-| `/auto all` | YOLO mode — auto-apply everything |
-| `/auto fixes` | Only auto-apply error fixes |
-| `/auto safe` | Reset to manual confirmations |
-
-## Adaptive Learning
-| Command | Description |
-|---|---|
-| `/adaptive on` | Enable ML-based model routing |
-| `/adaptive off` | Disable adaptive routing |
-| `/adaptive stats` | Show learned model performance |
-| `/adaptive reset` | Clear adaptive data |
-| `/adaptive train` | Force retrain from outcomes |
-| `/feedback good` | Rate last response positively |
-| `/feedback bad` | Rate last response negatively |
-
-## Display
-| Command | Description |
-|---|---|
-| `/verbose [quiet/normal/verbose]` | Set verbosity level |
-| `/quiet` | Minimal output |
-| `/normal` | Default output |
-| `/toggle <setting>` | Toggle: thinking, previews, diffs, metrics, scan, tools, streaming |
-| `/toggle diffs off` | Explicitly set a toggle |
-
-## Context Management
-| Command | Description |
-|---|---|
-| `/context` | Show detailed context usage breakdown |
-| `/compact` | Smart-compress conversation history |
-| `/reset` | Clear conversation entirely |
-| `/tokens` | Same as /context |
-
-## Other
-| Command | Description |
-|---|---|
-| `/aiignore` | Create .aiignore file |
-| `/fix-fences [dir]` | Remove accidental markdown fences from files |
-
-## Tips
-- End line with `\\\\` for multi-line input
-- Pipe: `type file.py | python cli.py "review"`
-- File arg: `python cli.py -f main.py "find bugs"`
-"""))
+    console.print(Markdown("\n".join(lines)))
 
 
 # ── Interactive Mode ───────────────────────────────────────────
@@ -1501,10 +1504,10 @@ def interactive_mode(session: ChatSession, config: dict):
 
     console.print(Panel.fit(
         f"[bold green]Local AI CLI[/bold green]\n"
-        f"Model: [cyan]{config['model']}[/cyan] │ "
+        f"Model: [cyan]{config['model']}[/cyan] | "
         f"CWD: [dim]{os.getcwd()}[/dim]\n"
-        f"[dim]/help for commands • "
-        f"end line with \\\\ for multi-line • "
+        f"[dim]/help for commands - "
+        f"end line with \\\\ for multi-line - "
         f"/quit to exit[/dim]",
         border_style="green",
     ))

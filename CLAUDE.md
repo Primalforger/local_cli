@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Local AI CLI — a feature-rich command-line coding assistant powered by Ollama (local LLMs). Python-based, ~18,500 lines across 24 modules. Minimal dependencies: httpx, rich, prompt_toolkit, pyyaml.
+Local AI CLI — a feature-rich command-line coding assistant powered by Ollama (local LLMs). Python-based, organized into 6 packages + entry points. Dependencies: httpx, rich, prompt_toolkit, pyyaml, scikit-learn.
 
 ## Setup & Running
 
@@ -14,55 +14,48 @@ Local AI CLI — a feature-rich command-line coding assistant powered by Ollama 
 
 # Manual setup
 python -m venv .venv && source .venv/Scripts/activate  # Windows bash
-pip install httpx rich prompt_toolkit pyyaml
+pip install -e .
 
 # Run
 python cli.py
-```
 
-There is no test suite, linter, or build system configured. Validation happens through the tool-based auto-test feedback loops in builder.py.
+# Run tests
+pytest tests/ -v
+```
 
 ## Architecture
 
-**Layered design: CLI → Chat/Tools → Core Modules → Support Infrastructure**
+**Layered design:** `cli.py` → `core/` (chat, config, display) → `tools/` + `llm/` → `utils/`
 
-**Entry point:** `cli.py` — REPL loop with 40+ slash commands, dispatches to modules.
+**Entry points** stay at root: `cli.py` (REPL), `mcp_server.py` (MCP stdio server).
 
 **Core data flow (chat):**
-User input → `cli.py` (command routing) → `chat.py` (ChatSession streams to Ollama API) → parses tool calls → `tools.py` (executes file/shell operations) → results fed back to LLM → Rich-formatted output.
+User input → `cli.py` → `core/chat.py` (streams via `llm/llm_backend.py`) → parses tool calls → `tools/*` executes → results fed back → Rich-formatted output.
 
 **Core data flow (plan/build):**
-`/plan` → `planner.py` (generates structured JSON plan) → `/build` → `builder.py` (executes steps, auto-tests, diagnoses errors with up to 5 fix attempts, git checkpoints after each step).
+`/plan` → `planning/planner.py` → `/build` → `planning/builder.py` (auto-test/fix loop, git checkpoints).
 
-### Key Module Responsibilities
+### Package Structure
 
-| Module | Role |
-|---|---|
-| `cli.py` | REPL, command dispatch, session lifecycle |
-| `chat.py` | ChatSession class — streaming, tool call handling, error diagnosis |
-| `tools.py` | Tool registry — custom `<tool:name>args</tool:name>` format for file ops, shell, etc. |
-| `builder.py` | MVP builder — step-by-step plan execution with auto-test/fix loops |
-| `planner.py` | Structured JSON plan generation (3-8 steps, dependency-ordered) |
-| `project_context.py` | Recursive project scanning, language detection, import/dependency graphs |
-| `project_reviewer.py` | Full codebase analysis → structured JSON review with severity ratings |
-| `model_router.py` | Task-type detection, model selection from 20+ pre-configured profiles |
-| `diff_editor.py` | Parses `<file path="...">` blocks from LLM output, applies incremental edits |
-| `context_manager.py` | Token budget tracking — auto-compact at 85%, force at 95% |
-| `git_integration.py` | Git operations, auto-commits, checkpoint system |
-| `memory.py` | Per-project `.ai_memory.json` persistence for decisions/patterns |
-| `undo.py` | Conversation snapshots with named branches (max 50) |
-| `config.py` | Config loading/validation, defaults, platform-aware paths |
-| `prompts.py` | Built-in + custom prompt templates with `{context}` placeholders |
-| `templates.py` | 20+ project starter templates (FastAPI, React, CLI tools, etc.) |
-| `watch_mode.py` | File monitoring with debounce, extension filtering |
+| Package | Modules | Role |
+|---|---|---|
+| `core/` | chat, config, display, command_registry, context_manager, session_manager, memory, undo | Chat engine, configuration, sessions, display control |
+| `planning/` | planner, builder, project_context, project_reviewer, templates | Plan generation, step execution, codebase analysis |
+| `llm/` | llm_backend, model_router, prompts | Ollama backend abstraction, task routing, prompt templates |
+| `tools/` | file_ops, shell, search, git_tools, web, analysis, +6 more | 56 tool functions (lazy-loaded) using `<tool:name>` XML format |
+| `adaptive/` | adaptive_engine, adaptive_seed, outcome_tracker, prompt_optimizer | ML task classifier, outcome tracking, prompt tuning |
+| `utils/` | sandbox, file_utils, git_integration, diff_editor, error_diagnosis, +6 more | Shared utilities: sandboxing, git ops, diagnostics |
+
+**Root shim files** — each moved module has a one-line shim at root (`sys.modules` redirect) so `from config import X` and `from core.config import X` both work. Shims can be removed once all imports migrate to qualified paths.
 
 ## Code Conventions
 
+- **Qualified imports** — use `from core.config import X`, `from utils.sandbox import Y`, etc. Root shim files exist for backwards compat but new code should use qualified paths.
 - **All output uses Rich** — `Console` from `rich`, never bare `print()`.
 - **Type hints throughout** — Python 3.10+ syntax (`list[dict]`, `dict[str, list]`).
 - **Section comments** — `# ── Section Name ──────` to demarcate logical blocks within modules.
 - **Safe imports** — try/except with graceful fallbacks when optional modules are unavailable.
-- **Display control** — all UI output routed through `display.py` (Verbosity enum: QUIET/NORMAL/VERBOSE) with individual toggles (thinking, previews, diffs, metrics, streaming).
+- **Display control** — all UI output routed through `core/display.py` (Verbosity enum: QUIET/NORMAL/VERBOSE) with individual toggles (thinking, previews, diffs, metrics, streaming).
 - **Tool format** — LLM-facing tools use custom XML tags: `<tool:tool_name>args</tool:tool_name>`.
 
 ## Configuration
