@@ -4,11 +4,13 @@ import re
 import shutil
 from pathlib import Path
 
-from tools.common import console, _sanitize_tool_args, _confirm
+from tools.common import console, _sanitize_tool_args, _validate_path, _confirm
 
 
 _SENSITIVE_PATTERNS = re.compile(
-    r"(PASSWORD|SECRET|KEY|TOKEN|API_KEY|AUTH|PRIVATE)",
+    r"(PASSWORD|SECRET|KEY|TOKEN|API_KEY|AUTH|PRIVATE|"
+    r"CREDENTIAL|CONNECTION_STRING|DATABASE_URL|REDIS_URL|"
+    r"MONGO_URI|SMTP_PASS|STRIPE_SK|ACCESS_ID)",
     re.IGNORECASE,
 )
 
@@ -43,10 +45,10 @@ def _parse_env(content: str) -> list[tuple[str, str, str]]:
 def tool_dotenv_read(args: str) -> str:
     """Read and display a .env file with sensitive values masked."""
     filepath = _sanitize_tool_args(args).strip() or ".env"
-    path = Path(filepath)
 
-    if not path.exists():
-        return f"Error: '{filepath}' not found."
+    path, error = _validate_path(filepath)
+    if error:
+        return error
 
     try:
         content = path.read_text(encoding="utf-8")
@@ -84,10 +86,12 @@ def tool_dotenv_set(args: str) -> str:
     if not key or not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', key):
         return f"Error: Invalid key name '{key}'."
 
-    if not _confirm(f"Set {key} in '{filepath}'? (y/n): "):
-        return "Cancelled."
+    path, error = _validate_path(filepath, must_exist=False)
+    if error:
+        return error
 
-    path = Path(filepath)
+    if not _confirm(f"Set {key} in '{path}'? (y/n): "):
+        return "Cancelled."
 
     if path.exists():
         try:

@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from tools.common import console, _sanitize_tool_args
+from tools.common import console, _sanitize_tool_args, _validate_path
 
 
 def _traverse(data: object, path: str) -> object:
@@ -76,9 +76,9 @@ def tool_json_query(args: str) -> str:
     if not filepath:
         return "Error: filepath is required."
 
-    path = Path(filepath)
-    if not path.exists():
-        return f"Error: '{filepath}' not found."
+    path, error = _validate_path(filepath)
+    if error:
+        return error
 
     try:
         content = path.read_text(encoding="utf-8")
@@ -105,9 +105,9 @@ def tool_json_validate(args: str) -> str:
     if not filepath:
         return "Usage: <tool:json_validate>filepath</tool> or <tool:json_validate>filepath|schema_path</tool>"
 
-    path = Path(filepath)
-    if not path.exists():
-        return f"Error: '{filepath}' not found."
+    path, error = _validate_path(filepath)
+    if error:
+        return error
 
     try:
         content = path.read_text(encoding="utf-8")
@@ -124,9 +124,9 @@ def tool_json_validate(args: str) -> str:
         return f"✓ Valid JSON: {filepath}\n{stats}"
 
     # Schema validation
-    schema_file = Path(schema_path)
-    if not schema_file.exists():
-        return f"Error: Schema file '{schema_path}' not found."
+    schema_file, schema_error = _validate_path(schema_path)
+    if schema_error:
+        return schema_error
 
     try:
         schema = json.loads(schema_file.read_text(encoding="utf-8"))
@@ -177,9 +177,9 @@ def tool_yaml_to_json(args: str) -> str:
     if not filepath:
         return "Usage: <tool:yaml_to_json>filepath</tool> (.yaml→JSON output, .json→YAML output)"
 
-    path = Path(filepath)
-    if not path.exists():
-        return f"Error: '{filepath}' not found."
+    path, error = _validate_path(filepath)
+    if error:
+        return error
 
     try:
         content = path.read_text(encoding="utf-8")

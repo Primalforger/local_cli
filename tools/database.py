@@ -11,11 +11,13 @@ from tools.common import (
 )
 
 
-def _connect(db_path: str) -> tuple[sqlite3.Connection | None, str | None]:
-    """Open a SQLite connection, returning (conn, error)."""
-    path = Path(db_path).resolve()
+def _connect(db_path: Path) -> tuple[sqlite3.Connection | None, str | None]:
+    """Open a SQLite connection, returning (conn, error).
+
+    Expects a validated Path (already checked by _validate_path).
+    """
     try:
-        conn = sqlite3.connect(str(path))
+        conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         return conn, None
     except sqlite3.Error as e:
@@ -61,12 +63,16 @@ def tool_db_query(args: str) -> str:
     if len(parts) < 2:
         return "Usage: <tool:db_query>database_path|sql_query</tool> or <tool:db_query>database_path|sql_query|write</tool>"
 
-    db_path = parts[0].strip()
+    raw_path = parts[0].strip()
     sql = parts[1].strip()
     write_mode = len(parts) >= 3 and parts[2].strip().lower() == "write"
 
-    if not db_path or not sql:
+    if not raw_path or not sql:
         return "Error: Both database_path and sql_query are required."
+
+    path, error = _validate_path(raw_path)
+    if error:
+        return error
 
     # Safety: block writes unless explicitly requested
     sql_upper = sql.strip().upper()
@@ -75,14 +81,14 @@ def tool_db_query(args: str) -> str:
     if is_mutating and not write_mode:
         return (
             "Error: This query modifies data. Add |write to confirm:\n"
-            f"<tool:db_query>{db_path}|{sql}|write</tool>"
+            f"<tool:db_query>{raw_path}|{sql}|write</tool>"
         )
 
     if is_mutating:
-        if not _confirm(f"Execute write query on '{db_path}'? (y/n): ", action="command"):
+        if not _confirm(f"Execute write query on '{path}'? (y/n): ", action="command"):
             return "Cancelled."
 
-    conn, err = _connect(db_path)
+    conn, err = _connect(path)
     if err:
         return err
 
@@ -100,11 +106,15 @@ def tool_db_query(args: str) -> str:
 
 def tool_db_schema(args: str) -> str:
     """Show the schema (CREATE statements) of a SQLite database."""
-    db_path = _sanitize_tool_args(args).strip()
-    if not db_path:
+    raw_path = _sanitize_tool_args(args).strip()
+    if not raw_path:
         return "Usage: <tool:db_schema>database_path</tool>"
 
-    conn, err = _connect(db_path)
+    path, error = _validate_path(raw_path)
+    if error:
+        return error
+
+    conn, err = _connect(path)
     if err:
         return err
 
@@ -131,11 +141,15 @@ def tool_db_schema(args: str) -> str:
 
 def tool_db_tables(args: str) -> str:
     """List all tables in a SQLite database with row counts."""
-    db_path = _sanitize_tool_args(args).strip()
-    if not db_path:
+    raw_path = _sanitize_tool_args(args).strip()
+    if not raw_path:
         return "Usage: <tool:db_tables>database_path</tool>"
 
-    conn, err = _connect(db_path)
+    path, error = _validate_path(raw_path)
+    if error:
+        return error
+
+    conn, err = _connect(path)
     if err:
         return err
 
@@ -167,22 +181,26 @@ def tool_db_create(args: str) -> str:
     if len(parts) < 2:
         return "Usage: <tool:db_create>database_path|sql_schema</tool>"
 
-    db_path = parts[0].strip()
+    raw_path = parts[0].strip()
     schema = parts[1].strip()
 
-    if not db_path or not schema:
+    if not raw_path or not schema:
         return "Error: Both database_path and sql_schema are required."
 
-    if Path(db_path).exists():
-        return f"Error: Database '{db_path}' already exists."
+    path, error = _validate_path(raw_path, must_exist=False)
+    if error:
+        return error
 
-    if not _confirm(f"Create database '{db_path}' with provided schema? (y/n): "):
+    if path.exists():
+        return f"Error: Database '{raw_path}' already exists."
+
+    if not _confirm(f"Create database '{path}' with provided schema? (y/n): "):
         return "Cancelled."
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(str(path))
         conn.executescript(schema)
         conn.close()
-        return f"✓ Created database '{db_path}' with schema applied."
+        return f"✓ Created database '{path}' with schema applied."
     except sqlite3.Error as e:
         return f"Error creating database: {e}"
