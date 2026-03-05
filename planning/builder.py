@@ -59,6 +59,11 @@ try:
 except ImportError:
     _dotenv_init_tool = None
 
+try:
+    from tools.web import _web_search_raw
+except ImportError:
+    _web_search_raw = None
+
 console = Console()
 MAX_FIX_ATTEMPTS = 5
 
@@ -1652,6 +1657,81 @@ def write_project_file(
         return False
 
 
+# ── Error-Driven Web Research ──────────────────────────────────
+
+def _search_error_context(error_text: str, diagnosis: dict) -> str:
+    """Search the web for an error as a last resort when fixes are stuck.
+
+    Extracts a targeted search query from the error diagnosis and
+    DuckDuckGo results, returning formatted context for the LLM.
+
+    Args:
+        error_text: Combined stdout+stderr from the failing command
+        diagnosis: Result from diagnose_test_error()
+
+    Returns:
+        Formatted string to append to the system prompt, or "" on failure.
+    """
+    if _web_search_raw is None:
+        return ""
+
+    # Build a targeted query from the diagnosis
+    error_type = diagnosis.get("error_type", "unknown")
+    missing_module = diagnosis.get("missing_module", "")
+    root_cause = diagnosis.get("root_cause", "")
+
+    query_parts: list[str] = []
+
+    if error_type != "unknown":
+        query_parts.append(error_type.replace("_", " "))
+    if missing_module:
+        query_parts.append(missing_module)
+    if root_cause and len(root_cause) < 80:
+        query_parts.append(root_cause)
+
+    # Fallback: extract the first recognizable error line
+    if not query_parts:
+        for line in error_text.splitlines():
+            line = line.strip()
+            if any(kw in line.lower() for kw in (
+                "error", "exception", "failed", "traceback",
+            )) and 10 < len(line) < 200:
+                # Clean up noise (paths, timestamps)
+                cleaned = re.sub(r'File ".*?",?\s*', '', line)
+                cleaned = re.sub(r'line \d+', '', cleaned).strip()
+                if cleaned:
+                    query_parts.append(cleaned[:100])
+                    break
+
+    if not query_parts:
+        return ""
+
+    query = "python fix " + " ".join(query_parts)
+    console.print("[dim]🔍 Searching web for error solutions...[/dim]")
+
+    try:
+        results = _web_search_raw(query, max_results=3)
+    except Exception:
+        return ""
+
+    if not results:
+        return ""
+
+    block = (
+        "\n\n" + "=" * 60 + "\n"
+        "🌐 WEB RESEARCH — solutions found online:\n\n"
+    )
+    for i, r in enumerate(results, 1):
+        block += f"{i}. {r['title']}\n"
+        if r.get("snippet"):
+            block += f"   {r['snippet']}\n"
+    block += (
+        "\nUse these findings to inform your fix approach.\n"
+        + "=" * 60
+    )
+    return block
+
+
 # ── Auto-Fix ───────────────────────────────────────────────────
 
 def auto_fix(
@@ -1934,6 +2014,12 @@ def auto_fix(
         system += history_block
 
     if attempt >= 3:
+        # Last resort: search the web for error solutions
+        if config.get("plan_web_research", True):
+            web_context = _search_error_context(combined_output, diagnosis)
+            if web_context:
+                system += web_context
+
         system += (
             "\n\nIMPORTANT: Previous edit attempts FAILED. "
             "Use <file> tags with COMPLETE file contents. "
