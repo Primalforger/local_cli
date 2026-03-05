@@ -412,6 +412,45 @@ class BuildDashboard:
 
         return table
 
+    def print_checklist(self, current_step_id: int = 0):
+        """Print a static progress checklist (works with streaming)."""
+        lines = []
+        for step in self._steps:
+            sid = step.get("id", 0)
+            title = step.get("title", "")
+            status = self._status.get(sid, "pending")
+
+            if status == "passed":
+                lines.append(
+                    f"  [green][bold]✓[/bold] Step {sid}: "
+                    f"{title}[/green]"
+                )
+            elif status == "failed":
+                lines.append(
+                    f"  [red][bold]✗[/bold] Step {sid}: "
+                    f"{title}[/red]"
+                )
+            elif status == "skipped":
+                lines.append(
+                    f"  [dim]– Step {sid}: "
+                    f"{title} (skipped)[/dim]"
+                )
+            elif sid == current_step_id:
+                lines.append(
+                    f"  [bold yellow]→ Step {sid}: "
+                    f"{title}[/bold yellow]"
+                )
+            else:
+                lines.append(
+                    f"  [dim]○ Step {sid}: {title}[/dim]"
+                )
+
+        console.print(Panel(
+            "\n".join(lines),
+            title="Build Progress",
+            border_style="dim",
+        ))
+
 
 # ── Prompts ────────────────────────────────────────────────────
 
@@ -3675,7 +3714,7 @@ def build_plan(
         if step_id < start_step:
             continue
 
-        console.print(f"\n{'=' * 60}")
+        dashboard.print_checklist(current_step_id=step_id)
 
         files_needed = step.get("files_to_create", [])
         new_files = [
@@ -3883,9 +3922,12 @@ def build_plan(
             f"complete![/green]"
         )
 
+    # Print final checklist showing all steps completed
+    dashboard.print_checklist()
+
     # ── Final validation ───────────────────────────────
     if validate_at_end:
-        console.print(f"\n{'=' * 60}")
+        console.print()
         console.print("[bold]🧪 Final Validation[/bold]")
         project_info = detect_project_type(
             base_dir, plan
