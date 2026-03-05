@@ -1170,12 +1170,19 @@ def _replace_dep_line(
     old_name: str, old_ver: str,
     new_name: str, new_ver: str,
 ) -> list[str]:
-    """Replace a dependency line in requirements.txt content."""
-    old_entry = f"{old_name}{old_ver}"
+    """Replace a dependency line in requirements.txt content.
+
+    Handles extras notation: ``old_name[extra]==ver`` is matched by
+    a pattern that allows optional ``[...]`` between name and version.
+    """
+    # Pattern: old_name (optional [extras]) old_ver
+    pattern = re.compile(
+        re.escape(old_name) + r"(?:\[.*?\])?" + re.escape(old_ver)
+    )
     new_entry = f"{new_name}{new_ver}"
     return [
-        line.replace(old_entry, new_entry)
-        if old_entry in line else line
+        pattern.sub(new_entry, line, count=1)
+        if pattern.search(line) else line
         for line in lines
     ]
 
