@@ -1,8 +1,10 @@
 """Setup wizard — first-run model selection, VRAM detection, routing config."""
 
+import os
 import re
 import subprocess
 import sys
+import tempfile
 
 import httpx
 from rich.console import Console
@@ -14,37 +16,69 @@ from core.config import CONFIG_PATH, save_config
 
 # ── Constants ─────────────────────────────────────────────────
 
-VRAM_PER_BILLION_Q4 = 0.6  # GB per billion params (Q4 quantized)
+QUANT_BITS: dict[str, float] = {
+    "Q4_K_M": 4.5,   # 4-bit k-means medium
+    "Q5_K_M": 5.5,   # 5-bit k-means medium
+    "Q8_0":   8.0,    # 8-bit
+    "F16":    16.0,   # full precision
+}
+
+QUANT_PRIORITY = ["Q4_K_M", "Q8_0", "Q5_K_M"]  # preferred order for recommendations
+
+KV_CACHE_PER_1K_CTX_PER_B = 0.02   # GB per 1K context tokens per billion params
+BASE_OVERHEAD_GB = 0.5              # CUDA/runtime overhead
 
 RECOMMENDED_MODELS: list[dict] = [
     # ── Coding: Qwen ──────────────────────────────────────────
-    {"name": "qwen2.5-coder:7b",       "params": 7,  "tier": "low",    "note": "Good starter for coding"},
-    {"name": "qwen2.5-coder:14b",      "params": 14, "tier": "medium", "note": "Best balance of speed and quality"},
-    {"name": "qwen2.5-coder:32b",      "params": 32, "tier": "high",   "note": "Top quality dense coder"},
-    {"name": "qwen3-coder:30b",        "params": 30, "active_params": 3.3, "tier": "medium", "note": "Agentic coding, MoE (3.3B active)"},
-    {"name": "qwen3-coder-next:latest", "params": 80, "active_params": 3, "tier": "high", "note": "Latest agentic coder, MoE (3B active)"},
+    {"name": "qwen2.5-coder:7b",       "params": 7,  "tier": "low",    "note": "Good starter for coding",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 32768},
+    {"name": "qwen2.5-coder:14b",      "params": 14, "tier": "medium", "note": "Best balance of speed and quality",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 32768},
+    {"name": "qwen2.5-coder:32b",      "params": 32, "tier": "high",   "note": "Top quality dense coder",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 32768},
+    {"name": "qwen3-coder:30b",        "params": 30, "active_params": 3.3, "tier": "medium", "note": "Agentic coding, MoE (3.3B active)",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 262144},
+    {"name": "qwen3-coder-next:latest", "params": 80, "active_params": 3, "tier": "high", "note": "Latest agentic coder, MoE (3B active)",
+     "quants": ["Q4_K_M"], "max_ctx": 262144},
     # ── Coding: Mistral ───────────────────────────────────────
-    {"name": "devstral:24b",           "params": 24, "tier": "high",   "note": "SWE-bench leader, agentic coding"},
-    {"name": "codestral:22b",          "params": 22, "tier": "high",   "note": "80+ languages, code generation"},
+    {"name": "devstral:24b",           "params": 24, "tier": "high",   "note": "SWE-bench leader, agentic coding",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 131072},
+    {"name": "codestral:22b",          "params": 22, "tier": "high",   "note": "80+ languages, code generation",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 32768},
     # ── Coding: DeepSeek ──────────────────────────────────────
-    {"name": "deepseek-coder-v2:latest", "params": 16, "tier": "medium", "note": "Strong at code review"},
+    {"name": "deepseek-coder-v2:latest", "params": 16, "tier": "medium", "note": "Strong at code review",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 131072},
     # ── Coding: StarCoder ─────────────────────────────────────
-    {"name": "starcoder2:15b",         "params": 15, "tier": "medium", "note": "Transparent training, 16K context"},
-    {"name": "starcoder2:7b",          "params": 7,  "tier": "low",    "note": "Lightweight code completion"},
+    {"name": "starcoder2:15b",         "params": 15, "tier": "medium", "note": "Transparent training, 16K context",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 16384},
+    {"name": "starcoder2:7b",          "params": 7,  "tier": "low",    "note": "Lightweight code completion",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 16384},
     # ── Coding: Meta ──────────────────────────────────────────
-    {"name": "codellama:13b",          "params": 13, "tier": "medium", "note": "Meta code model, many languages"},
-    {"name": "codellama:7b",           "params": 7,  "tier": "low",    "note": "Fast code completion"},
+    {"name": "codellama:13b",          "params": 13, "tier": "medium", "note": "Meta code model, many languages",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 16384},
+    {"name": "codellama:7b",           "params": 7,  "tier": "low",    "note": "Fast code completion",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 16384},
     # ── General / Reasoning ───────────────────────────────────
-    {"name": "qwen3:8b",              "params": 8,  "tier": "low",    "note": "Good general-purpose"},
-    {"name": "qwen3:14b",             "params": 14, "tier": "medium", "note": "Strong reasoning and coding"},
-    {"name": "qwen3:32b",             "params": 32, "tier": "high",   "note": "High-quality general model"},
-    {"name": "qwen3.5:9b",            "params": 9,  "tier": "low",    "note": "Multimodal, 256K context"},
-    {"name": "gemma3:12b",            "params": 12, "tier": "medium", "note": "Google multimodal, 128K context"},
-    {"name": "gemma3:27b",            "params": 27, "tier": "high",   "note": "Google multimodal, top quality"},
-    {"name": "llama3.1:latest",       "params": 8,  "tier": "low",    "note": "Meta's general model"},
-    {"name": "deepseek-r1:14b",       "params": 14, "tier": "medium", "note": "Reasoning model (distilled)"},
-    {"name": "phi4:latest",           "params": 14, "tier": "medium", "note": "Microsoft, strong reasoning"},
-    {"name": "mistral:latest",        "params": 7,  "tier": "low",    "note": "Fast general-purpose"},
+    {"name": "qwen3:8b",              "params": 8,  "tier": "low",    "note": "Good general-purpose",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 32768},
+    {"name": "qwen3:14b",             "params": 14, "tier": "medium", "note": "Strong reasoning and coding",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 32768},
+    {"name": "qwen3:32b",             "params": 32, "tier": "high",   "note": "High-quality general model",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 32768},
+    {"name": "qwen3.5:9b",            "params": 9,  "tier": "low",    "note": "Multimodal, 256K context",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 262144},
+    {"name": "gemma3:12b",            "params": 12, "tier": "medium", "note": "Google multimodal, 128K context",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 131072},
+    {"name": "gemma3:27b",            "params": 27, "tier": "high",   "note": "Google multimodal, top quality",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 131072},
+    {"name": "llama3.1:latest",       "params": 8,  "tier": "low",    "note": "Meta's general model",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 131072},
+    {"name": "deepseek-r1:14b",       "params": 14, "tier": "medium", "note": "Reasoning model (distilled)",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 65536},
+    {"name": "phi4:latest",           "params": 14, "tier": "medium", "note": "Microsoft, strong reasoning",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 16384},
+    {"name": "mistral:latest",        "params": 7,  "tier": "low",    "note": "Fast general-purpose",
+     "quants": ["Q4_K_M", "Q8_0"], "max_ctx": 32768},
 ]
 
 
@@ -104,15 +138,18 @@ def run_setup_wizard(config: dict, console: Console | None = None) -> dict:
 
     # Prompt 1: model selection
     try:
-        chosen_model = _prompt_model_selection(console, recommendations)
+        chosen_idx = _prompt_model_selection(console, recommendations)
     except (KeyboardInterrupt, EOFError):
         console.print("\n[dim]Setup cancelled — using defaults.[/dim]")
         config["_setup_completed"] = True
         save_config(config)
         return config
 
+    chosen = recommendations[chosen_idx]
+    chosen_model = chosen["name"]
+
     # Prompt 2 (conditional): download if not installed
-    if chosen_model not in installed_names:
+    if not chosen["installed"]:
         try:
             downloaded = _prompt_download(console, chosen_model)
         except (KeyboardInterrupt, EOFError):
@@ -126,6 +163,20 @@ def run_setup_wizard(config: dict, console: Console | None = None) -> dict:
             )
 
     config["model"] = chosen_model
+
+    # Prompt 2.5: tuned profile (Modelfile creation)
+    if vram_budget is not None:
+        try:
+            tuned_name = _prompt_tuned_profile(
+                console, chosen_model, vram_budget,
+                chosen.get("max_ctx", 32768),
+                chosen["params"],
+                chosen.get("quant", "Q4_K_M"),
+            )
+            if tuned_name:
+                config["model"] = tuned_name
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Tuned profile skipped.[/dim]")
 
     # Prompt 3: auto-routing
     try:
@@ -143,7 +194,7 @@ def run_setup_wizard(config: dict, console: Console | None = None) -> dict:
     route_label = "auto" if route_mode == "auto" else "manual"
     console.print(
         f"\n[green]✓ Setup complete![/green]  "
-        f"Model: [bold]{chosen_model}[/bold], routing: {route_label}\n"
+        f"Model: [bold]{config['model']}[/bold], routing: {route_label}\n"
     )
     return config
 
@@ -214,6 +265,71 @@ def _estimate_vram_budget(system_info: dict) -> float | None:
     return None
 
 
+# ── VRAM Estimation ──────────────────────────────────────────
+
+def _estimate_model_vram(params: float, quant: str, num_ctx: int = 0) -> float:
+    """Calculate total VRAM (weights + KV cache + overhead) in GB.
+
+    Args:
+        params: Billions of parameters.
+        quant: Quantization level (key into QUANT_BITS).
+        num_ctx: Context window size in tokens (0 = weights + overhead only).
+    """
+    bits = QUANT_BITS.get(quant, 4.5)
+    weights_gb = params * bits / 8
+    kv_gb = (num_ctx / 1024) * KV_CACHE_PER_1K_CTX_PER_B * params
+    return weights_gb + kv_gb + BASE_OVERHEAD_GB
+
+
+def _best_quant_for_budget(
+    model: dict, vram_budget: float
+) -> tuple[str, float] | None:
+    """Pick the highest-quality quantization that fits in the VRAM budget.
+
+    Tries quantizations from highest quality to lowest among those
+    available for the model. Returns (quant_name, vram_est) or None
+    if nothing fits.
+    """
+    available = model.get("quants", ["Q4_K_M"])
+    # Try from highest quality to lowest
+    quality_order = ["Q8_0", "Q5_K_M", "Q4_K_M"]
+
+    for quant in quality_order:
+        if quant not in available:
+            continue
+        vram = _estimate_model_vram(model["params"], quant)
+        if vram <= vram_budget + 0.5:  # 0.5 GB tolerance
+            return (quant, vram)
+
+    return None
+
+
+def _calculate_max_context(
+    params: float, quant: str, vram_budget: float, max_ctx: int
+) -> int:
+    """Calculate the largest context window that fits in remaining VRAM.
+
+    Subtracts model weight VRAM from budget, then calculates how many
+    context tokens fit in the remainder. Caps at max_ctx and rounds
+    down to nearest 1024.
+    """
+    bits = QUANT_BITS.get(quant, 4.5)
+    weights_gb = params * bits / 8 + BASE_OVERHEAD_GB
+    remaining_gb = vram_budget - weights_gb
+    if remaining_gb <= 0:
+        return 2048  # absolute minimum
+
+    kv_per_token = KV_CACHE_PER_1K_CTX_PER_B * params / 1024  # GB per token
+    if kv_per_token <= 0:
+        return max_ctx
+
+    max_tokens = int(remaining_gb / kv_per_token)
+    # Round down to nearest 1024
+    max_tokens = (max_tokens // 1024) * 1024
+    max_tokens = max(max_tokens, 2048)  # minimum 2048
+    return min(max_tokens, max_ctx)
+
+
 # ── Model Recommendations ────────────────────────────────────
 
 def _extract_param_count(model_name: str) -> float | None:
@@ -227,23 +343,47 @@ def _extract_param_count(model_name: str) -> float | None:
     return None
 
 
+def _quant_model_tag(model_name: str, quant: str) -> str:
+    """Construct the Ollama tag for a specific quantization.
+
+    Q4_K_M uses the original tag (e.g. 'qwen2.5-coder:14b').
+    Other quants append the quant level (e.g. 'qwen2.5-coder:14b-q8_0').
+    """
+    if quant == "Q4_K_M":
+        return model_name
+    return f"{model_name}-{quant.lower()}"
+
+
 def _recommend_models(
     vram_budget: float | None, installed_names: list[str]
 ) -> list[dict]:
     """Filter and sort RECOMMENDED_MODELS for the user's system.
 
     Returns list of dicts with added keys: installed (bool), recommended (bool),
-    vram_est (float), speed (str).
+    vram_est (float), speed (str), quant (str), quant_tag (str).
     """
     results: list[dict] = []
 
-    # Determine VRAM cap: use budget if known, else allow up to 14B models
-    vram_cap = vram_budget if vram_budget is not None else 14 * VRAM_PER_BILLION_Q4
+    # Determine VRAM cap: use budget if known, else allow models up to ~8.4 GB
+    fallback_cap = _estimate_model_vram(14, "Q4_K_M")  # ~8.4 GB
+    vram_cap = vram_budget if vram_budget is not None else fallback_cap
 
     for model in RECOMMENDED_MODELS:
-        vram_est = model["params"] * VRAM_PER_BILLION_Q4
-        if vram_est > vram_cap + 1.0:  # 1 GB tolerance
+        # Find best quantization that fits
+        if vram_budget is not None:
+            best = _best_quant_for_budget(model, vram_cap)
+        else:
+            # Unknown VRAM: default to Q4_K_M with rough estimate
+            vram_est = _estimate_model_vram(model["params"], "Q4_K_M")
+            if vram_est <= vram_cap + 1.0:
+                best = ("Q4_K_M", vram_est)
+            else:
+                best = None
+
+        if best is None:
             continue
+
+        quant, vram_est = best
 
         # Determine speed label (MoE models use active_params for speed)
         speed_params = model.get("active_params", model["params"])
@@ -261,6 +401,8 @@ def _recommend_models(
             "recommended": False,
             "vram_est": vram_est,
             "speed": speed,
+            "quant": quant,
+            "quant_tag": _quant_model_tag(model["name"], quant),
         })
 
     # Mark the best candidate as recommended:
@@ -296,7 +438,7 @@ def _display_model_table(
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
     table.add_column("#", style="dim", width=3)
     table.add_column("Model", min_width=25)
-    table.add_column("Params", justify="right", width=7)
+    table.add_column("Quant", width=8)
     table.add_column("VRAM", justify="right", width=8)
     table.add_column("Speed", width=8)
     table.add_column("Status", min_width=18)
@@ -313,7 +455,7 @@ def _display_model_table(
         table.add_row(
             str(i),
             m["name"],
-            f"{m['params']}B",
+            m.get("quant", "Q4_K_M"),
             f"~{m['vram_est']:.0f} GB",
             m["speed"],
             status,
@@ -323,10 +465,98 @@ def _display_model_table(
     console.print()
 
 
+# ── Modelfile Generation ────────────────────────────────────
+
+def _generate_modelfile(base_model: str, num_ctx: int, num_gpu: int = -1) -> str:
+    """Return Modelfile content string for a tuned model variant.
+
+    Args:
+        base_model: The source model tag (e.g. 'qwen2.5-coder:14b').
+        num_ctx: Context window size in tokens.
+        num_gpu: Number of GPU layers (-1 = all layers on GPU, omitted from output).
+    """
+    lines = [f"FROM {base_model}", f"PARAMETER num_ctx {num_ctx}"]
+    if num_gpu != -1:
+        lines.append(f"PARAMETER num_gpu {num_gpu}")
+    return "\n".join(lines) + "\n"
+
+
+def _sanitize_model_name(model_name: str) -> str:
+    """Sanitize a model name for use as a tuned variant name.
+
+    Replaces colons and dots with dashes: 'qwen2.5-coder:14b' → 'qwen2-5-coder-14b'.
+    """
+    return re.sub(r"[:.]+", "-", model_name).strip("-")
+
+
+def _create_tuned_model(
+    console: Console, base_model: str, vram_budget: float,
+    max_ctx: int, params: float, quant: str,
+) -> str | None:
+    """Write a Modelfile, run ``ollama create``, return created model name or None."""
+    num_ctx = _calculate_max_context(params, quant, vram_budget, max_ctx)
+    tuned_name = f"localcli-{_sanitize_model_name(base_model)}"
+    modelfile_content = _generate_modelfile(base_model, num_ctx)
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".modelfile", delete=False
+        ) as f:
+            f.write(modelfile_content)
+            modelfile_path = f.name
+
+        result = subprocess.run(
+            ["ollama", "create", tuned_name, "-f", modelfile_path],
+            check=False, capture_output=True, text=True,
+        )
+
+        # Clean up temp file
+        try:
+            os.unlink(modelfile_path)
+        except OSError:
+            pass
+
+        if result.returncode == 0:
+            console.print(
+                f"  [green]✓ Created tuned model:[/green] [bold]{tuned_name}[/bold]\n"
+                f"    Context: {num_ctx} tokens, GPU layers: all"
+            )
+            return tuned_name
+        else:
+            console.print(
+                f"  [red]Failed to create tuned model (exit {result.returncode})[/red]\n"
+                f"  [dim]{result.stderr.strip()}[/dim]"
+            )
+            return None
+
+    except FileNotFoundError:
+        console.print("  [red]'ollama' not found on PATH. Cannot create tuned model.[/red]")
+        return None
+
+
+def _prompt_tuned_profile(
+    console: Console, model_name: str, vram_budget: float,
+    max_ctx: int, params: float, quant: str,
+) -> str | None:
+    """Prompt user to create a tuned profile. Returns created model name or None."""
+    try:
+        raw = input(
+            f"\n  Create a tuned profile? (sets context window and GPU layers\n"
+            f"  to fit your ~{vram_budget:.0f} GB VRAM) [Y/n]: "
+        ).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        raise
+
+    if raw in ("n", "no"):
+        return None
+
+    return _create_tuned_model(console, model_name, vram_budget, max_ctx, params, quant)
+
+
 # ── Interactive Prompts ───────────────────────────────────────
 
-def _prompt_model_selection(console: Console, recommendations: list[dict]) -> str:
-    """Prompt user to pick a model. Returns model name."""
+def _prompt_model_selection(console: Console, recommendations: list[dict]) -> int:
+    """Prompt user to pick a model. Returns index into recommendations list."""
     # Find default (recommended model)
     default_idx = 1
     for i, m in enumerate(recommendations, 1):
@@ -341,13 +571,13 @@ def _prompt_model_selection(console: Console, recommendations: list[dict]) -> st
             raise
 
         if not raw:
-            return recommendations[default_idx - 1]["name"]
+            return default_idx - 1
 
         # Try as number
         try:
             idx = int(raw)
             if 1 <= idx <= len(recommendations):
-                return recommendations[idx - 1]["name"]
+                return idx - 1
             console.print(
                 f"[yellow]  Please enter 1-{len(recommendations)}[/yellow]"
             )
@@ -356,9 +586,9 @@ def _prompt_model_selection(console: Console, recommendations: list[dict]) -> st
             pass
 
         # Try as model name (exact or partial match)
-        for m in recommendations:
+        for i, m in enumerate(recommendations):
             if raw == m["name"] or m["name"].startswith(raw):
-                return m["name"]
+                return i
 
         console.print(f"[yellow]  Unknown model '{raw}'. Pick a number or name.[/yellow]")
 
