@@ -36,6 +36,8 @@ def _ensure_session_attrs(session: ChatSession):
         session._last_review = None
     if not hasattr(session, "_last_suggestions"):
         session._last_suggestions = None
+    if not hasattr(session, "_pipeline"):
+        session._pipeline = None
 
 
 # ── Slash Commands (registered via @command decorator) ────────
@@ -568,6 +570,62 @@ def cmd_route(ctx: CommandContext):
             f"Current mode: [cyan]{ctx.session._router.mode}[/cyan]"
         )
         ctx.console.print("[dim]Modes: auto, fast, quality, manual[/dim]")
+
+
+@command("/pipeline", description="Multi-model pipeline", category="Core")
+def cmd_pipeline(ctx: CommandContext):
+    from llm.model_router import Pipeline, PIPELINE_PHASES
+
+    _ensure_session_attrs(ctx.session)
+    arg = ctx.arg.strip() if ctx.arg else ""
+
+    # /pipeline clear
+    if arg == "clear":
+        if ctx.session._pipeline:
+            ctx.session._pipeline.clear()
+            ctx.session._pipeline = None
+        ctx.console.print("[green]Pipeline cleared.[/green]")
+        return
+
+    # /pipeline phases
+    if arg == "phases":
+        ctx.console.print("\n[bold]Available pipeline phases:[/bold]")
+        for phase, desc in PIPELINE_PHASES.items():
+            ctx.console.print(f"  [cyan]{phase}[/cyan]: {desc}")
+        ctx.console.print(
+            "\n[dim]Usage: /pipeline analyze:model1 "
+            "generate:model2 review:model3[/dim]"
+        )
+        return
+
+    # /pipeline show (or just /pipeline with no args)
+    if not arg or arg == "show":
+        if ctx.session._pipeline and ctx.session._pipeline.active:
+            ctx.console.print("\n[bold]Current pipeline:[/bold]")
+            ctx.console.print(ctx.session._pipeline.summary())
+        else:
+            ctx.console.print("[dim]No pipeline configured.[/dim]")
+            ctx.console.print(
+                "[dim]Usage: /pipeline analyze:model1 "
+                "generate:model2[/dim]"
+            )
+        return
+
+    # /pipeline analyze:model1 generate:model2 ...
+    try:
+        pipeline = Pipeline.from_spec(arg)
+        ctx.session._pipeline = pipeline
+        ctx.console.print("[green]Pipeline configured:[/green]")
+        ctx.console.print(pipeline.summary())
+    except ValueError as e:
+        ctx.console.print(f"[red]{e}[/red]")
+        ctx.console.print(
+            "[dim]Usage: /pipeline analyze:model1 "
+            "generate:model2 review:model3[/dim]"
+        )
+        ctx.console.print(
+            f"[dim]Valid phases: {', '.join(PIPELINE_PHASES)}[/dim]"
+        )
 
 
 # ── Project Scan ───────────────────────────────────────────────

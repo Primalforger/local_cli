@@ -362,12 +362,113 @@ def diagnose_test_error(error_output: str) -> dict:
     return diagnosis
 
 
-def format_error_guidance(result_text: str) -> str:
+def read_error_context(
+    diagnosis: dict,
+    max_files: int = 3,
+    context_lines: int = 30,
+    max_file_size: int = 50_000,
+) -> str:
+    """Read affected files from a diagnosis and return their contents.
+
+    Automatically injects file contents so the LLM can fix errors
+    without an extra read_file round-trip.
+
+    Args:
+        diagnosis: Diagnosis dict from diagnose_test_error()
+        max_files: Maximum number of files to include
+        context_lines: Lines to show around error line for large files
+        max_file_size: Skip files larger than this (bytes)
+
+    Returns:
+        Formatted string with file contents, or empty string if none found.
+    """
+    # Collect file:line pairs from import_chain and affected_files
+    file_lines: list[tuple[str, int | None]] = []
+    seen_files: set[str] = set()
+
+    for entry in diagnosis.get("import_chain", []):
+        if ":" in entry:
+            parts = entry.rsplit(":", 1)
+            fpath = parts[0]
+            try:
+                lineno = int(parts[1])
+            except (ValueError, IndexError):
+                lineno = None
+            if fpath not in seen_files:
+                seen_files.add(fpath)
+                file_lines.append((fpath, lineno))
+
+    for fpath in diagnosis.get("affected_files", []):
+        if fpath not in seen_files:
+            seen_files.add(fpath)
+            file_lines.append((fpath, None))
+
+    if not file_lines:
+        return ""
+
+    parts = [
+        "\n\n" + "=" * 60,
+        "FILE CONTEXT (auto-included — fix directly, no need to call read_file)",
+        "=" * 60,
+    ]
+
+    files_included = 0
+    for fpath, lineno in file_lines:
+        if files_included >= max_files:
+            break
+
+        p = Path(fpath)
+        if not p.is_file():
+            continue
+
+        try:
+            size = p.stat().st_size
+            if size > max_file_size:
+                continue
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except (OSError, PermissionError):
+            continue
+
+        lines = content.splitlines()
+
+        if lineno and len(lines) > context_lines * 2:
+            # Show snippet around error line
+            start = max(0, lineno - context_lines - 1)
+            end = min(len(lines), lineno + context_lines)
+            snippet_lines = lines[start:end]
+            parts.append(f"\n--- {fpath} (lines {start + 1}-{end}) ---")
+            for i, line in enumerate(snippet_lines, start=start + 1):
+                marker = " >>>" if i == lineno else "    "
+                parts.append(f"{marker} {i:4d} | {line}")
+        else:
+            # Show whole file with line numbers
+            parts.append(f"\n--- {fpath} ---")
+            for i, line in enumerate(lines, start=1):
+                marker = " >>>" if lineno and i == lineno else "    "
+                parts.append(f"{marker} {i:4d} | {line}")
+
+        files_included += 1
+
+    parts.append("=" * 60)
+
+    if files_included == 0:
+        return ""
+
+    return "\n".join(parts)
+
+
+def format_error_guidance(result_text: str, diagnosis: dict | None = None) -> str:
     """
     Analyze test failure output and append smart, specific guidance
     so the LLM knows exactly what to fix instead of guessing.
+
+    Args:
+        result_text: Raw error output text
+        diagnosis: Pre-computed diagnosis dict. If None, calls
+                   diagnose_test_error() internally.
     """
-    diagnosis = diagnose_test_error(result_text)
+    if diagnosis is None:
+        diagnosis = diagnose_test_error(result_text)
 
     if diagnosis["error_type"] == "unknown":
         return (

@@ -16,6 +16,7 @@ from core.context_manager import (
 )
 from utils.error_diagnosis import (
     diagnose_test_error, format_error_guidance, _is_test_failure,
+    read_error_context,
 )
 from llm.llm_backend import OllamaBackend
 
@@ -55,6 +56,14 @@ def _show_streaming() -> bool:
     try:
         from core.display import show_streaming
         return show_streaming()
+    except (ImportError, AttributeError):
+        return True
+
+
+def _show_routing() -> bool:
+    try:
+        from core.display import show_routing
+        return show_routing()
     except (ImportError, AttributeError):
         return True
 
@@ -512,6 +521,7 @@ class ChatSession:
         self._undo = None
         self._last_review = None
         self._last_suggestions = None
+        self._pipeline = None
 
         self.budget = ContextBudget(
             max_ctx=config.get("num_ctx", 32768),
@@ -774,6 +784,124 @@ class ChatSession:
                     f"    [dim]... and {len(broken) - 8} more[/dim]"
                 )
 
+    def _run_pipeline(self, user_input: str) -> str:
+        """Execute a multi-model pipeline on user input.
+
+        Runs each pipeline step sequentially, feeding the output of one
+        phase as context to the next. Only the generate phase allows tool
+        calls (simplified loop, max 4 iterations). Only the final output
+        is added to conversation history.
+
+        Args:
+            user_input: The user's prompt
+
+        Returns:
+            Final response from the last pipeline phase.
+        """
+        from llm.model_router import PIPELINE_PHASES
+
+        pipeline = self._pipeline
+        previous_output = ""
+        final_response = ""
+
+        for i, step in enumerate(pipeline.steps):
+            phase_prompt = PIPELINE_PHASES.get(step.phase, "")
+            is_last = (i == len(pipeline.steps) - 1)
+
+            # Display phase header
+            console.print(
+                f"\n[bold magenta]── Phase {i + 1}: "
+                f"{step.phase.upper()} ({step.model}) ──[/bold magenta]"
+            )
+
+            # Build step-specific messages
+            step_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        self.messages[0]["content"]
+                        + f"\n\n[Pipeline Phase: {step.phase.upper()}]\n"
+                        + phase_prompt
+                    ),
+                }
+            ]
+
+            # Include user prompt with any previous phase output
+            if previous_output:
+                step_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Original request: {user_input}\n\n"
+                        f"Previous phase output:\n{previous_output}"
+                    ),
+                })
+            else:
+                step_messages.append({
+                    "role": "user",
+                    "content": user_input,
+                })
+
+            # Temporarily set model for this phase
+            original_model = self.config["model"]
+            self.config["model"] = step.model
+
+            try:
+                console.print("\n[bold blue]Assistant:[/bold blue]")
+                response = stream_response(step_messages, self.config)
+
+                # Generate phase allows tool calls (max 4 iterations)
+                if step.phase == "generate" and response:
+                    for _iter in range(4):
+                        tool_calls = parse_tool_calls(response)
+                        if not tool_calls:
+                            break
+
+                        result_text, _, has_write = (
+                            self._execute_tools(tool_calls)
+                        )
+                        if has_write:
+                            self._validate_written_files(tool_calls)
+
+                        step_messages.append({
+                            "role": "assistant",
+                            "content": response,
+                        })
+                        step_messages.append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM: Tool execution results]\n\n"
+                                + result_text
+                            ),
+                        })
+
+                        console.print(
+                            "\n[bold blue]Assistant:[/bold blue]"
+                        )
+                        response = stream_response(
+                            step_messages, self.config
+                        )
+                        if not response:
+                            break
+
+                previous_output = response or ""
+                final_response = response or ""
+
+            finally:
+                self.config["model"] = original_model
+
+        # Add only the final output to conversation history
+        if final_response:
+            self.messages.append({
+                "role": "user",
+                "content": user_input,
+            })
+            self.messages.append({
+                "role": "assistant",
+                "content": final_response,
+            })
+
+        return final_response
+
     def send(self, user_input: str) -> str:
         """Send user input, handle tool calls, return final response."""
         # Save undo state
@@ -827,7 +955,18 @@ class ChatSession:
 
         # Route model if enabled
         if self._router and self._router.mode != "manual":
-            self.config["model"] = self._router.route(user_input)
+            route_result = self._router.route(user_input)
+            self.config["model"] = route_result.model
+            self._current_task_type = route_result.task_type
+            if _show_routing() and route_result.task_type not in ("manual",):
+                console.print(
+                    f"[dim]  routing: {route_result.task_type} -> "
+                    f"{route_result.model}[/dim]"
+                )
+
+        # Pipeline execution — if active, delegate to pipeline runner
+        if self._pipeline and self._pipeline.active:
+            return self._run_pipeline(user_input)
 
         # Soft steering: inject ML-optimized prompt addition
         self._current_strategy = ""
@@ -906,11 +1045,22 @@ class ChatSession:
 
             # ── Smart error guidance injection ──
             if _is_test_failure(result_text):
-                error_guidance = format_error_guidance(result_text)
-                result_text += error_guidance
-                console.print(
-                    "[dim]  📋 Error diagnosed — guidance injected[/dim]"
+                diagnosis = diagnose_test_error(result_text)
+                error_guidance = format_error_guidance(
+                    result_text, diagnosis=diagnosis
                 )
+                result_text += error_guidance
+                file_context = read_error_context(diagnosis)
+                if file_context:
+                    result_text += file_context
+                    console.print(
+                        "[dim]  error diagnosed -- guidance + "
+                        "file context injected[/dim]"
+                    )
+                else:
+                    console.print(
+                        "[dim]  error diagnosed -- guidance injected[/dim]"
+                    )
             elif has_read_only and not has_write:
                 result_text += (
                     "\n\nPresent these results clearly and concisely. "

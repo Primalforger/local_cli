@@ -54,6 +54,7 @@ class _DisplayState:
         self.scan_details = False  # Show full scan tree (off by default)
         self.tool_output = True    # Show tool results
         self.streaming = True      # Show streaming tokens (vs just final result)
+        self.routing = True        # Show routing decisions (task type → model)
 
     def apply_verbosity(self, level: Verbosity):
         """Apply a verbosity preset — sets all toggles to match the level."""
@@ -67,6 +68,7 @@ class _DisplayState:
             self.scan_details = False
             self.tool_output = False
             self.streaming = True    # Always stream — but hide extras
+            self.routing = False
 
         elif level == Verbosity.NORMAL:
             self.thinking = True
@@ -76,6 +78,7 @@ class _DisplayState:
             self.scan_details = False
             self.tool_output = True
             self.streaming = True
+            self.routing = True
 
         elif level == Verbosity.VERBOSE:
             self.thinking = True
@@ -85,6 +88,7 @@ class _DisplayState:
             self.scan_details = True
             self.tool_output = True
             self.streaming = True
+            self.routing = True
 
 
 # Single global instance
@@ -101,12 +105,13 @@ _TOGGLE_MAP = {
     "tools": "tool_output",
     "tool_output": "tool_output",    # Alias
     "streaming": "streaming",
+    "routing": "routing",
 }
 
 # Canonical toggle names (excludes aliases) for display purposes
 _TOGGLE_NAMES = {
     "thinking", "previews", "diffs", "metrics",
-    "scan", "tools", "streaming",
+    "scan", "tools", "streaming", "routing",
 }
 
 # Verbosity level name mapping
@@ -163,6 +168,11 @@ def show_tool_output() -> bool:
 def show_streaming() -> bool:
     """Whether to stream tokens in real-time."""
     return _state.streaming
+
+
+def show_routing() -> bool:
+    """Whether to show routing decisions (task type and model)."""
+    return _state.routing
 
 
 # ── Public API: Setters ───────────────────────────────────────
@@ -259,6 +269,7 @@ def display_status():
         ("scan", _state.scan_details, "Show full file tree on /scan"),
         ("tools", _state.tool_output, "Show tool execution output"),
         ("streaming", _state.streaming, "Stream tokens in real-time"),
+        ("routing", _state.routing, "Show routing decisions"),
     ]
 
     for name, value, desc in settings:
@@ -306,6 +317,7 @@ def display_compact_status() -> str:
         ("scan", _state.scan_details, defaults.scan_details),
         ("tools", _state.tool_output, defaults.tool_output),
         ("streaming", _state.streaming, defaults.streaming),
+        ("routing", _state.routing, defaults.routing),
     ]
 
     for name, current, default in toggle_checks:

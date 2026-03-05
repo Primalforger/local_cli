@@ -11,13 +11,19 @@ from Ollama's model list.
 """
 
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import httpx
 from rich.console import Console
 from rich.table import Table
 
 console = Console()
+
+
+class RouteResult(NamedTuple):
+    """Result of model routing — carries both the model and detected task type."""
+    model: str
+    task_type: str
 
 
 # ── Model Profiles ─────────────────────────────────────────────
@@ -680,7 +686,7 @@ def route_model(
     ollama_url: str,
     preferred_model: Optional[str] = None,
     mode: str = "auto",
-) -> str:
+) -> RouteResult:
     """Route a prompt to the best available model.
 
     Args:
@@ -690,7 +696,7 @@ def route_model(
         mode: Routing mode ('auto', 'fast', 'quality', 'manual')
 
     Returns:
-        Best model name for this task
+        RouteResult with model name and detected task type
     """
     fallback = preferred_model or "qwen2.5-coder:14b"
 
@@ -699,18 +705,27 @@ def route_model(
 
     # Manual mode = use preferred, but fall back if unavailable
     if mode == "manual":
-        return ensure_model_available(fallback, ollama_url, available)
+        return RouteResult(
+            model=ensure_model_available(fallback, ollama_url, available),
+            task_type="manual",
+        )
 
     if not available:
-        return fallback
+        return RouteResult(model=fallback, task_type="manual")
 
     # Fast mode = pick fastest available
     if mode == "fast":
-        return _pick_fastest(available, fallback)
+        return RouteResult(
+            model=_pick_fastest(available, fallback),
+            task_type="fast",
+        )
 
     # Quality mode = pick highest quality available
     if mode == "quality":
-        return _pick_best_quality(available, fallback)
+        return RouteResult(
+            model=_pick_best_quality(available, fallback),
+            task_type="quality",
+        )
 
     # Auto mode = score models for task
     task_type = detect_task_type(prompt)
@@ -724,13 +739,7 @@ def route_model(
             best_score = score
             best_model = model
 
-    # Only announce if routing changed the model
-    if best_model != preferred_model and best_model != fallback:
-        console.print(
-            f"[dim]🧭 Task: {task_type} → Model: {best_model}[/dim]"
-        )
-
-    return best_model
+    return RouteResult(model=best_model, task_type=task_type)
 
 
 def _pick_fastest(
@@ -827,7 +836,7 @@ class ModelRouter:
         """Disable adaptive ML routing."""
         self._adaptive_engine = None
 
-    def route(self, prompt: str) -> str:
+    def route(self, prompt: str) -> RouteResult:
         """Route a prompt to the best model.
 
         When adaptive routing is enabled, uses ML task detection
@@ -838,24 +847,24 @@ class ModelRouter:
             prompt: User prompt
 
         Returns:
-            Model name to use
+            RouteResult with model name and detected task type
         """
         if self.mode == "manual":
-            model = self.default_model
+            result = RouteResult(model=self.default_model, task_type="manual")
         elif self._adaptive_engine is not None:
-            model = self._adaptive_route(prompt)
+            result = self._adaptive_route(prompt)
         else:
-            model = route_model(
+            result = route_model(
                 prompt, self.ollama_url, self.default_model, self.mode
             )
 
         # Track usage
         self._route_count += 1
-        self._model_usage[model] = self._model_usage.get(model, 0) + 1
+        self._model_usage[result.model] = self._model_usage.get(result.model, 0) + 1
 
-        return model
+        return result
 
-    def _adaptive_route(self, prompt: str) -> str:
+    def _adaptive_route(self, prompt: str) -> RouteResult:
         """Route using adaptive engine + static fallback."""
         engine = self._adaptive_engine
         task_type, confidence = engine.detect_task_type(prompt)
@@ -867,11 +876,7 @@ class ModelRouter:
         )
 
         if best_model and best_model != self.default_model:
-            console.print(
-                f"[dim]Adaptive: {task_type} "
-                f"({confidence:.0%}) -> {best_model}[/dim]"
-            )
-            return best_model
+            return RouteResult(model=best_model, task_type=task_type)
 
         # Fall back to static routing
         return route_model(
@@ -1047,3 +1052,137 @@ class ModelRouter:
         self._route_count = 0
         self._model_usage.clear()
         console.print("[dim]Routing stats reset.[/dim]")
+
+
+# ── Multi-Model Pipelines ─────────────────────────────────────
+
+PIPELINE_PHASES: dict[str, str] = {
+    "analyze": (
+        "ANALYSIS phase — analyze, break down, plan. Do NOT write code."
+    ),
+    "generate": (
+        "CODE GENERATION phase — write implementation. "
+        "Use tools to create/edit files."
+    ),
+    "review": (
+        "REVIEW phase — check for bugs, security issues, edge cases."
+    ),
+    "test": (
+        "TESTING phase — write comprehensive tests."
+    ),
+}
+
+
+def get_phase_prompt(phase: str) -> str:
+    """Get the system prompt for a pipeline phase.
+
+    Args:
+        phase: Phase name (analyze, generate, review, test)
+
+    Returns:
+        Phase instruction string, or empty string if unknown.
+    """
+    return PIPELINE_PHASES.get(phase, "")
+
+
+class PipelineStep:
+    """A single step in a multi-model pipeline."""
+
+    __slots__ = ("phase", "model")
+
+    def __init__(self, phase: str, model: str):
+        self.phase = phase
+        self.model = model
+
+    def __repr__(self) -> str:
+        return f"PipelineStep(phase={self.phase!r}, model={self.model!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PipelineStep):
+            return NotImplemented
+        return self.phase == other.phase and self.model == other.model
+
+
+class Pipeline:
+    """Multi-model pipeline — chains different models across phases."""
+
+    def __init__(self):
+        self.steps: list[PipelineStep] = []
+
+    def add(self, phase: str, model: str) -> bool:
+        """Add a phase-model step to the pipeline.
+
+        Args:
+            phase: Phase name (must be in PIPELINE_PHASES)
+            model: Model name to use for this phase
+
+        Returns:
+            True if added, False if phase is invalid.
+        """
+        if phase not in PIPELINE_PHASES:
+            return False
+        self.steps.append(PipelineStep(phase=phase, model=model))
+        return True
+
+    def clear(self):
+        """Remove all steps from the pipeline."""
+        self.steps.clear()
+
+    @property
+    def active(self) -> bool:
+        """Whether the pipeline has any steps configured."""
+        return len(self.steps) > 0
+
+    def summary(self) -> str:
+        """Return a human-readable summary of the pipeline.
+
+        Returns:
+            Formatted string showing each step, or "(empty)" if no steps.
+        """
+        if not self.steps:
+            return "(empty)"
+        parts = []
+        for i, step in enumerate(self.steps, 1):
+            parts.append(f"  {i}. {step.phase} -> {step.model}")
+        return "\n".join(parts)
+
+    @classmethod
+    def from_spec(cls, spec: str) -> "Pipeline":
+        """Parse a pipeline specification string.
+
+        Format: "phase:model phase:model ..."
+        Model names may contain colons (e.g., qwen2.5-coder:14b),
+        so we split on the FIRST colon per token.
+
+        Args:
+            spec: Space-separated "phase:model" pairs
+
+        Returns:
+            Configured Pipeline instance
+
+        Raises:
+            ValueError: If any token is malformed or phase is invalid
+        """
+        pipeline = cls()
+        tokens = spec.strip().split()
+
+        for token in tokens:
+            if ":" not in token:
+                raise ValueError(
+                    f"Invalid pipeline token '{token}' — "
+                    f"expected 'phase:model'"
+                )
+            phase, model = token.split(":", 1)
+            if not phase or not model:
+                raise ValueError(
+                    f"Invalid pipeline token '{token}' — "
+                    f"phase and model cannot be empty"
+                )
+            if phase not in PIPELINE_PHASES:
+                raise ValueError(
+                    f"Unknown phase '{phase}'. "
+                    f"Valid phases: {', '.join(PIPELINE_PHASES)}"
+                )
+            pipeline.steps.append(PipelineStep(phase=phase, model=model))
+
+        return pipeline

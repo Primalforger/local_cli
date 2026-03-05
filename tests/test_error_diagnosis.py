@@ -4,6 +4,7 @@ import pytest
 
 from error_diagnosis import (
     diagnose_test_error, format_error_guidance, _is_test_failure,
+    read_error_context,
 )
 
 
@@ -138,3 +139,95 @@ class TestIsTestFailure:
 
     def test_empty_input(self):
         assert _is_test_failure("") is False
+
+
+class TestReadErrorContext:
+    """Test read_error_context file inclusion."""
+
+    def test_no_files_returns_empty(self):
+        diagnosis = {
+            "import_chain": [],
+            "affected_files": [],
+        }
+        assert read_error_context(diagnosis) == ""
+
+    def test_reads_existing_file(self, tmp_path):
+        src = tmp_path / "app.py"
+        src.write_text("x = 1\ny = 2\nz = 3\n")
+
+        diagnosis = {
+            "import_chain": [f"{src}:2"],
+            "affected_files": [str(src)],
+        }
+        result = read_error_context(diagnosis)
+        assert "app.py" in result
+        assert "x = 1" in result
+        assert "FILE CONTEXT" in result
+
+    def test_respects_max_files(self, tmp_path):
+        files = []
+        for i in range(5):
+            f = tmp_path / f"mod{i}.py"
+            f.write_text(f"# module {i}\n")
+            files.append(str(f))
+
+        diagnosis = {
+            "import_chain": [f"{f}:1" for f in files],
+            "affected_files": files,
+        }
+        result = read_error_context(diagnosis, max_files=2)
+        # Should only include 2 files
+        count = result.count("---")
+        # Each file has a header line with --- so count >= 2 but files <= 2
+        assert count <= 6  # 2 file headers + closing separator
+
+    def test_snippet_around_error_line(self, tmp_path):
+        src = tmp_path / "big.py"
+        lines = [f"line_{i} = {i}" for i in range(100)]
+        src.write_text("\n".join(lines))
+
+        diagnosis = {
+            "import_chain": [f"{src}:50"],
+            "affected_files": [str(src)],
+        }
+        result = read_error_context(diagnosis, context_lines=5)
+        # Should show snippet, not entire file
+        assert ">>>" in result  # Error line marker
+        assert "line_49" in result
+        assert "line_0" not in result  # Too far from line 50
+
+    def test_skips_nonexistent(self):
+        diagnosis = {
+            "import_chain": ["/nonexistent/path.py:1"],
+            "affected_files": ["/nonexistent/path.py"],
+        }
+        assert read_error_context(diagnosis) == ""
+
+    def test_skips_large_files(self, tmp_path):
+        src = tmp_path / "huge.py"
+        src.write_text("x" * 60_000)
+
+        diagnosis = {
+            "import_chain": [f"{src}:1"],
+            "affected_files": [str(src)],
+        }
+        result = read_error_context(diagnosis, max_file_size=50_000)
+        assert result == ""
+
+
+class TestFormatErrorGuidanceWithDiagnosis:
+    """Test format_error_guidance with precomputed diagnosis."""
+
+    def test_precomputed_matches_auto(self):
+        error = """
+ModuleNotFoundError: No module named 'flask'
+"""
+        auto_result = format_error_guidance(error)
+        diagnosis = diagnose_test_error(error)
+        precomputed_result = format_error_guidance(error, diagnosis=diagnosis)
+        assert auto_result == precomputed_result
+
+    def test_none_diagnosis_calls_internally(self):
+        error = "SyntaxError: invalid syntax"
+        result = format_error_guidance(error, diagnosis=None)
+        assert "ERROR DIAGNOSIS" in result or "IMPORTANT" in result
