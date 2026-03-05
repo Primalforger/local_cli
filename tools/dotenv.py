@@ -119,8 +119,9 @@ def tool_dotenv_set(args: str) -> str:
         new_content = f"{key}={value}\n"
 
     try:
+        is_new = not path.exists()
         path.write_text(new_content, encoding="utf-8")
-        action = "Updated" if path.exists() else "Created"
+        action = "Created" if is_new else "Updated"
         return f"✓ {action} {key} in '{filepath}'."
     except OSError as e:
         return f"Error writing '{filepath}': {e}"

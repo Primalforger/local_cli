@@ -582,7 +582,7 @@ class ModelRouter:
             alpha: Naive Bayes smoothing parameter
         """
         try:
-            from adaptive_engine import AdaptiveEngine
+            from adaptive.adaptive_engine import AdaptiveEngine
             self._adaptive_engine = AdaptiveEngine(
                 model_file=model_file,
                 min_samples=min_samples,

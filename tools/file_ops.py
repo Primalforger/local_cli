@@ -378,9 +378,7 @@ def _fuzzy_find_block(search: str, content: str, threshold: float = 0.8) -> Opti
         # Calculate byte offsets from line numbers
         all_lines = content.split("\n")
         start_idx = sum(len(all_lines[i]) + 1 for i in range(best_start))
-        end_idx = sum(len(all_lines[i]) + 1 for i in range(best_end))
-        if end_idx > 0:
-            end_idx -= 1
+        end_idx = start_idx + len("\n".join(all_lines[best_start:best_end]))
         return (start_idx, end_idx)
 
     return None

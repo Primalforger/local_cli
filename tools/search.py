@@ -55,7 +55,7 @@ def tool_search_text(args: str) -> str:
 def tool_search_replace(args: str) -> str:
     """Search and replace text in a file."""
     cleaned = _sanitize_tool_args(args)
-    parts = cleaned.split("|")
+    parts = cleaned.split("|", maxsplit=2)
     if len(parts) != 3:
         return "Error: Use format filepath|search_text|replace_text"
 
@@ -198,7 +198,7 @@ def tool_grep_context(args: str) -> str:
             for idx in sorted(match_indices):
                 start = max(0, idx - context)
                 end = min(len(file_lines), idx + context + 1)
-                if start in shown and (start - 1) in shown:
+                if start in shown:
                     pass
                 elif shown:
                     results.append("---")

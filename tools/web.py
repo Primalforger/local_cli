@@ -225,7 +225,7 @@ def tool_serve_static(args: str) -> str:
 
         proc = subprocess.Popen(
             cmd, shell=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             preexec_fn=os.setsid if sys.platform != "win32" else None,
         )
 
@@ -414,7 +414,7 @@ def tool_websocket_test(args: str) -> str:
                         output += "  No response within 5s\n"
                 return output
 
-        return asyncio.get_event_loop().run_until_complete(test_ws())
+        return asyncio.run(test_ws())
     except ImportError:
         return (
             "Error: websockets not installed.\n"

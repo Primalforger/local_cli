@@ -331,7 +331,7 @@ def watch_with_lint(
 
     Runs syntax checking on modified Python/JS/TS files.
     """
-    from tools import tool_check_syntax
+    from tools.analysis import tool_check_syntax
 
     def on_change(changes: dict[str, str], cfg: dict):
         lintable = {".py", ".js", ".ts", ".jsx", ".tsx", ".json"}

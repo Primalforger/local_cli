@@ -74,7 +74,7 @@ def show_diff(old_content: str, new_content: str, filepath: str):
         # Fallback if Syntax rendering fails
         console.print(Panel(
             diff_text[:2000],
-            title=f"📝 {filepath} +{additions} -{{deletions}}",
+            title=f"📝 {filepath} +{additions} -{deletions}",
             border_style="yellow",
         ))
 
@@ -111,8 +111,7 @@ def apply_search_replace(
     if search in content:
         if content.count(search) == 1:
             return content.replace(search, replace, 1)
-        # Multiple occurrences — fall through so the LLM is forced
-        # to provide more surrounding context next attempt
+        return None  # Multiple matches; require more specific search text
 
     # 2. Strip trailing whitespace on each line and retry
     content_norm = _normalize_trailing_whitespace(content)

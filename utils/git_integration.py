@@ -3,6 +3,7 @@
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -97,8 +98,9 @@ def run_git(args: str, cwd: str = ".", timeout: int = 30) -> dict:
         }
 
     try:
+        split_args = shlex.split(args, posix=(sys.platform != "win32"))
         result = subprocess.run(
-            ["git"] + shlex.split(args),
+            ["git"] + split_args,
             capture_output=True,
             text=True,
             cwd=cwd,
@@ -569,7 +571,7 @@ def get_changed_files(directory: str = ".") -> dict[str, str]:
     for line in result["stdout"].split("\n"):
         if not line or len(line) < 3:
             continue
-        status = line[:2].strip()
+        status = line[:2]
         filepath = line[3:].strip()
         if not filepath:
             continue
@@ -642,8 +644,10 @@ def get_status_summary(directory: str = ".") -> dict:
                 summary["untracked"] += 1
             elif "D" in status:
                 summary["deleted"] += 1
-            elif status.startswith("A") or status.startswith("M "):
+            elif status[0] in ("A", "M", "R", "C") and (len(status) < 2 or status[1] == " "):
                 summary["staged"] += 1
+            elif status[0] == " " and len(status) > 1 and status[1] in ("M", "D"):
+                summary["modified"] += 1
             else:
                 summary["modified"] += 1
 

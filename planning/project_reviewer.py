@@ -5,7 +5,6 @@ import re
 from pathlib import Path
 from typing import Optional
 
-import httpx
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table

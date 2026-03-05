@@ -277,7 +277,7 @@ class ResponseValidator:
             ))
 
         # Unclosed markdown code fences
-        fence_opens = len(re.findall(r"```\w*\n", response))
+        fence_opens = len(re.findall(r"```\w+\n", response))
         fence_closes = len(re.findall(r"\n```\s*$", response, re.MULTILINE))
         if fence_opens > fence_closes:
             issues.append(QualityIssue(

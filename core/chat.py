@@ -88,7 +88,7 @@ def parse_tool_calls(text: str) -> list[tuple[str, str]]:
     results = []
 
     # 1. Match properly closed tags first (most reliable)
-    closed_pattern = r"<tool:(\w+)>(.*?)</tool>"
+    closed_pattern = r"<tool:(\w+)>(.*?)</tool(?::\1)?>"
     for match in re.finditer(closed_pattern, text, re.DOTALL):
         tool_name = match.group(1)
         tool_args = match.group(2).strip()
@@ -443,7 +443,7 @@ READ_ONLY_TOOLS = frozenset({
 })
 
 READ_ONLY_GIT = frozenset({
-    "status", "log", "diff", "branch", "tag",
+    "status", "log", "diff", "tag",
     "show", "remote", "stash list",
 })
 
@@ -703,10 +703,10 @@ class ChatSession:
         ):
             self.messages.pop()
 
-        # Inject correction as system guidance
+        # Inject correction as user message (some Ollama models ignore mid-conversation system role)
         self.messages.append({
-            "role": "system",
-            "content": correction,
+            "role": "user",
+            "content": "[SYSTEM: Hallucination correction — this is automated, not user input]\n\n" + correction,
         })
 
         return True
@@ -957,10 +957,15 @@ class ChatSession:
                     ),
                 })
                 console.print("\n[bold blue]Assistant (corrected):[/bold blue]")
+                original_response = response
                 response = stream_response(self.messages, self.config)
                 if response:
                     self.messages.append({"role": "assistant", "content": response})
                     _was_corrected = True
+                else:
+                    # Correction failed; remove the correction prompt and keep original
+                    self.messages.pop()
+                    response = original_response
 
         self._show_context_usage()
 
@@ -979,7 +984,6 @@ class ChatSession:
         if (
             self._outcome_tracker is not None
             and self.config.get("outcome_feedback_mode", "auto") == "auto"
-            and response
         ):
             try:
                 _quality_score = -1.0

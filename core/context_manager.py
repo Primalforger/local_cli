@@ -135,7 +135,7 @@ class ContextBudget:
             elif role == "user":
                 # Check if it's a tool result
                 content = msg.get("content", "")
-                if content.startswith("Tool results:") or content.startswith("[Tool:"):
+                if content.startswith("Tool results:") or content.startswith("[Tool:") or content.startswith("[SYSTEM: Tool execution results"):
                     tool_tokens += t
                 else:
                     user_tokens += t
@@ -309,7 +309,7 @@ def smart_compact(
 
         # Extract key information
         if role == "user":
-            if content.startswith("Tool results:"):
+            if content.startswith("Tool results:") or content.startswith("[SYSTEM: Tool execution results"):
                 # Condense tool results
                 if "Successfully wrote" in content:
                     for line in content.split("\n"):
@@ -571,7 +571,12 @@ def prioritize_context(
             included += 1
             break
 
-    from core.display import get_verbosity, Verbosity
+    try:
+        from core.display import get_verbosity, Verbosity
+    except (ImportError, AttributeError):
+        get_verbosity = lambda: 1
+        class Verbosity:
+            NORMAL = 1
     if get_verbosity() >= Verbosity.NORMAL:
         console.print(
             f"[dim]  Context: {included}/{len(files)} files "

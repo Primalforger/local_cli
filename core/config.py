@@ -217,6 +217,7 @@ def _save_yaml(path: Path, data: dict):
         _save_json_fallback(path, data)
         return
 
+    tmp_path = None
     try:
         # Ensure parent directory exists
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +230,7 @@ def _save_yaml(path: Path, data: dict):
     except Exception as e:
         # Clean up temp file on failure
         try:
-            if tmp_path.exists():
+            if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink()
         except OSError:
             pass
@@ -385,7 +386,7 @@ def load_config() -> dict:
         # Also check for JSON fallback config
         json_path = CONFIG_PATH.with_suffix(".json")
         if json_path.exists():
-            user_config = _load_json_fallback(CONFIG_PATH)
+            user_config = _load_json_fallback(json_path)
             if user_config:
                 for key, value in user_config.items():
                     if key in _BOOL_KEYS and not isinstance(value, bool):
@@ -494,8 +495,9 @@ def display_config(config: dict):
             console.print(f"  [dim]{key}: {value}[/dim]")
         else:
             # Mask sensitive-looking values
+            SENSITIVE_KEYS = {"api_key", "api_token", "secret_key", "secret", "password", "auth_token", "access_token"}
             display_value = value
-            if any(s in key.lower() for s in ("key", "token", "secret", "password")):
+            if key.lower() in SENSITIVE_KEYS:
                 if value:
                     display_value = str(value)[:4] + "..."
                 else:

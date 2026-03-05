@@ -27,10 +27,15 @@ _MCP_INSTALL_MSG = (
 _active_sessions: dict[str, tuple[Any, Any]] = {}
 
 
+_registry_instance = None
+
 def _get_registry():
     """Lazy-import the MCP registry."""
-    from utils.mcp_registry import MCPRegistry
-    return MCPRegistry()
+    global _registry_instance
+    if _registry_instance is None:
+        from utils.mcp_registry import MCPRegistry
+        _registry_instance = MCPRegistry()
+    return _registry_instance
 
 
 # ── Async connection helpers ──────────────────────────────────

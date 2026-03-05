@@ -78,7 +78,7 @@ class UndoManager:
     def __init__(self, max_history: int = 50):
         self._history: list[ConversationSnapshot] = []
         self._redo_stack: list[ConversationSnapshot] = []
-        self._branches: dict[str, ConversationSnapshot] = []
+        self._branches: dict[str, ConversationSnapshot] = {}
         self._max_history = max_history
         self._current_branch: Optional[str] = None
 

@@ -99,8 +99,12 @@ class MCPRegistry:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=2, ensure_ascii=False)
             tmp_path.replace(self._path)
-        except OSError:
-            # Silently fail — the in-memory state is still valid
+        except OSError as e:
+            try:
+                from rich.console import Console as _Console
+                _Console().print(f"[yellow]Warning: Failed to save MCP registry: {e}[/yellow]")
+            except Exception:
+                pass
             try:
                 tmp = self._path.with_suffix(".json.tmp")
                 if tmp.exists():

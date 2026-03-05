@@ -102,8 +102,9 @@ def _sanitize_tool_args(args: str) -> str:
                 before = cleaned.split(marker)[0]
                 if ('/' in before or '\\' in before or before == '.'
                         or before.replace('.', '').replace('-', '').replace('_', '').isalnum()):
-                    cleaned = before
-                    break
+                    if len(before.strip()) < len(cleaned) * 0.8:
+                        cleaned = before
+                        break
 
     return cleaned
 
@@ -115,10 +116,20 @@ def _sanitize_path_arg(args: str) -> str:
     cleaned = cleaned.rstrip('.,;:!?')
     cleaned = cleaned.strip("\"'`")
 
-    while '//' in cleaned:
-        cleaned = cleaned.replace('//', '/')
-    while '\\\\' in cleaned:
-        cleaned = cleaned.replace('\\\\', '\\')
+    # Collapse duplicate separators but preserve UNC path prefixes
+    if cleaned.startswith('//') or cleaned.startswith('\\\\'):
+        prefix = cleaned[:2]
+        rest = cleaned[2:]
+        while '//' in rest:
+            rest = rest.replace('//', '/')
+        while '\\\\' in rest:
+            rest = rest.replace('\\\\', '\\')
+        cleaned = prefix + rest
+    else:
+        while '//' in cleaned:
+            cleaned = cleaned.replace('//', '/')
+        while '\\\\' in cleaned:
+            cleaned = cleaned.replace('\\\\', '\\')
 
     if len(cleaned) > 1 and cleaned[-1] in ('/', '\\'):
         cleaned = cleaned.rstrip('/\\')

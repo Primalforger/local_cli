@@ -585,7 +585,7 @@ def _emit_learning_signal(
     Best-effort — never blocks the build.
     """
     try:
-        from outcome_tracker import OutcomeTracker
+        from adaptive.outcome_tracker import OutcomeTracker
         tracker = OutcomeTracker()
         tracker.record(
             task_type=task_type,
@@ -2401,12 +2401,13 @@ def run_validation_pipeline(
             else:
                 sig_data = f"{stage_name}:{stage_type}:{passed}"
             error_hash = hashlib.md5(sig_data.encode()).hexdigest()
-            if error_hash == _last_error_hash:
+            if error_hash in _seen_error_hashes:
                 console.print(
                     "[yellow]Same error repeated — skipping "
                     "remaining fix attempts[/yellow]"
                 )
                 break
+            _seen_error_hashes.add(error_hash)
             _last_error_hash = error_hash
 
         if not passed:

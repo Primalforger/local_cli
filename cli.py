@@ -1477,10 +1477,14 @@ def _handle_fix_fences(arg: str):
         "__pycache__", "dist", "build",
     }
 
+    skip_extensions = {".md", ".markdown", ".rst", ".txt", ".ipynb"}
+
     for root, dirs, files in os.walk(base):
         dirs[:] = [d for d in dirs if d not in skip_dirs]
         for fname in files:
             fpath = Path(root) / fname
+            if fpath.suffix.lower() in skip_extensions:
+                continue
             try:
                 raw = fpath.read_text(encoding="utf-8")
                 checked += 1
@@ -1719,9 +1723,11 @@ def _handle_feedback(arg: str, session):
 
     _ensure_session_attrs(session)
 
-    updated = False
+    recorded = False
     if hasattr(session, "_outcome_tracker") and session._outcome_tracker:
         updated = session._outcome_tracker.record_feedback(feedback)
+        if updated:
+            recorded = True
 
     if (
         session._router
@@ -1734,6 +1740,7 @@ def _handle_feedback(arg: str, session):
             task_type=session._current_task_type,
             success=(feedback == "good"),
         )
+        recorded = True
 
     # Record prompt strategy outcome on explicit feedback
     if hasattr(session, "_prompt_optimizer") and session._prompt_optimizer:
@@ -1744,13 +1751,19 @@ def _handle_feedback(arg: str, session):
                     strategy_text=session._current_strategy,
                     success=(feedback == "good"),
                 )
+                recorded = True
             except Exception:
                 pass
 
-    if updated or feedback:
+    if recorded:
         emoji = "+" if feedback == "good" else "-"
         console.print(
             f"[green]Feedback recorded: [{emoji}] {feedback}[/green]"
+        )
+    else:
+        console.print(
+            "[yellow]Feedback noted, but no adaptive systems are "
+            "active to record it.[/yellow]"
         )
 
 

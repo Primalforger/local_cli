@@ -96,10 +96,11 @@ def should_ignore(filepath: str, patterns: list[str]) -> bool:
     parts = filepath_normalized.split("/")
 
     for pattern in patterns:
+        is_dir_pattern = pattern.endswith("/")
         pattern = pattern.rstrip("/")
 
         # Directory pattern (ends with /)
-        if pattern.endswith("/") or pattern in parts:
+        if is_dir_pattern or pattern in parts:
             if any(fnmatch.fnmatch(part, pattern.rstrip("/")) for part in parts):
                 return True
 

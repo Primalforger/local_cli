@@ -18,7 +18,7 @@ def tool_env_get(args: str) -> str:
 
     # Mask sensitive values
     if any(s in var_name.lower() for s in ("password", "secret", "key", "token", "api_key")):
-        return f"${var_name} = {value[:4]}****{value[-2:] if len(value) > 6 else ''} (masked)"
+        return f"${var_name} = {value[:4]}**** (masked)"
 
     return f"${var_name} = {value}"
 

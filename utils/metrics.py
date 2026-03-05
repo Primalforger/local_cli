@@ -61,7 +61,7 @@ class MetricsTracker:
     ) -> RequestMetrics:
         from core.display import show_metrics as _show_metrics
 
-        duration = time.time() - self._start_time
+        duration = time.time() - self._start_time if self._start_time > 0 else 0.0
         tps = self._token_count / duration if duration > 0 else 0
 
         m = RequestMetrics(
@@ -163,6 +163,12 @@ class MetricsTracker:
         if METRICS_FILE.exists():
             try:
                 data = json.loads(METRICS_FILE.read_text(encoding="utf-8"))
-                self.history = [RequestMetrics(**d) for d in data]
-            except Exception:
+                loaded = []
+                for d in data:
+                    try:
+                        loaded.append(RequestMetrics(**d))
+                    except (TypeError, Exception):
+                        continue  # Skip individual bad records
+                self.history = loaded
+            except (json.JSONDecodeError, OSError):
                 self.history = []

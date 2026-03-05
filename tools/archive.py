@@ -31,29 +31,29 @@ def tool_archive_create(args: str) -> str:
 
     try:
         if output_path.endswith(".zip"):
-            shutil.make_archive(
+            actual_path = shutil.make_archive(
                 str(out.with_suffix('')), 'zip',
                 root_dir=str(src.parent), base_dir=src.name,
             )
         elif output_path.endswith(".tar.gz") or output_path.endswith(".tgz"):
-            shutil.make_archive(
+            actual_path = shutil.make_archive(
                 str(out).replace('.tar.gz', '').replace('.tgz', ''), 'gztar',
                 root_dir=str(src.parent), base_dir=src.name,
             )
         elif output_path.endswith(".tar.bz2"):
-            shutil.make_archive(
+            actual_path = shutil.make_archive(
                 str(out).replace('.tar.bz2', ''), 'bztar',
                 root_dir=str(src.parent), base_dir=src.name,
             )
         elif output_path.endswith(".tar"):
-            shutil.make_archive(
+            actual_path = shutil.make_archive(
                 str(out.with_suffix('')), 'tar',
                 root_dir=str(src.parent), base_dir=src.name,
             )
         else:
             return "Error: Unsupported format. Use .zip, .tar.gz, .tar.bz2, or .tar"
 
-        size = out.stat().st_size if out.exists() else 0
+        size = Path(actual_path).stat().st_size
         return f"\u2713 Created archive: {output_path} ({size:,} bytes)"
     except Exception as e:
         return f"Error creating archive: {e}"

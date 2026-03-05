@@ -239,7 +239,7 @@ class OllamaBackend:
                 )
                 if e.response.status_code == 404 and retry < self._max_retries:
                     try:
-                        from model_router import ensure_model_available
+                        from llm.model_router import ensure_model_available
                         new_model = ensure_model_available(
                             self._model, self._url
                         )

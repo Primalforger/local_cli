@@ -32,12 +32,19 @@ def _show_scan_details() -> bool:
         return True
 
 
+class _FallbackVerbosity:
+    """Fallback verbosity enum when display module is unavailable."""
+    QUIET = 0
+    NORMAL = 1
+    VERBOSE = 2
+
+
 def _get_verbosity():
     try:
         from core.display import get_verbosity, Verbosity
         return get_verbosity(), Verbosity
     except (ImportError, AttributeError):
-        return 1, None
+        return _FallbackVerbosity.NORMAL, _FallbackVerbosity
 
 
 # ── Data Classes ───────────────────────────────────────────────

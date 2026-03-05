@@ -208,7 +208,15 @@ class SecretScanner:
         # Sort by start position descending so replacements don't shift indices
         all_matches.sort(key=lambda x: x[0], reverse=True)
 
+        # Filter overlapping matches
+        filtered = []
+        min_start = float('inf')
         for start, end, secret_type in all_matches:
+            if end <= min_start:
+                filtered.append((start, end, secret_type))
+                min_start = start
+
+        for start, end, secret_type in filtered:
             result = result[:start] + f"[REDACTED:{secret_type}]" + result[end:]
 
         return result

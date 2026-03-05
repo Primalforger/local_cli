@@ -116,18 +116,22 @@ def tool_run_background(args: str) -> str:
 
         # shell=True: user commands may contain pipes, redirects, shell expansions
         log_fh = open(log_path, 'w')
-        if sys.platform == "win32":
-            proc = subprocess.Popen(
-                command, shell=True,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                stdout=log_fh, stderr=subprocess.STDOUT,
-            )
-        else:
-            proc = subprocess.Popen(
-                command, shell=True,
-                stdout=log_fh, stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid,
-            )
+        try:
+            if sys.platform == "win32":
+                proc = subprocess.Popen(
+                    command, shell=True,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                    stdout=log_fh, stderr=subprocess.STDOUT,
+                )
+            else:
+                proc = subprocess.Popen(
+                    command, shell=True,
+                    stdout=log_fh, stderr=subprocess.STDOUT,
+                    preexec_fn=os.setsid,
+                )
+        except Exception:
+            log_fh.close()
+            raise
 
         _background_processes[proc.pid] = {
             "process": proc,
@@ -296,7 +300,10 @@ def tool_kill_process(args: str) -> str:
                         pid = pid.strip().split()[-1] if sys.platform == "win32" else pid.strip()
                         try:
                             pid_int = int(pid)
-                            os.kill(pid_int, signal.SIGTERM)
+                            if sys.platform == "win32":
+                                subprocess.run(["taskkill", "/F", "/PID", str(pid_int)], capture_output=True)
+                            else:
+                                os.kill(pid_int, signal.SIGTERM)
                         except (ValueError, ProcessLookupError):
                             pass
                     return f"Killed process(es) on port {target}"
