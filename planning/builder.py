@@ -1174,14 +1174,19 @@ def _replace_dep_line(
 
     Handles extras notation: ``old_name[extra]==ver`` is matched by
     a pattern that allows optional ``[...]`` between name and version.
+    Extras are preserved in the replacement.
     """
     # Pattern: old_name (optional [extras]) old_ver
     pattern = re.compile(
-        re.escape(old_name) + r"(?:\[.*?\])?" + re.escape(old_ver)
+        re.escape(old_name) + r"(\[.*?\])?" + re.escape(old_ver)
     )
-    new_entry = f"{new_name}{new_ver}"
+
+    def _replacer(m: re.Match) -> str:
+        extras = m.group(1) or ""
+        return f"{new_name}{extras}{new_ver}"
+
     return [
-        pattern.sub(new_entry, line, count=1)
+        pattern.sub(_replacer, line, count=1)
         if pattern.search(line) else line
         for line in lines
     ]
