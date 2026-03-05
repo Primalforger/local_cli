@@ -820,6 +820,29 @@ class ChatSession:
             self._current_task_type = "chat"
         self._tool_calls_this_turn = []
 
+        # Auto-plan detection — intercept plan-worthy requests
+        if self._current_plan is None:
+            try:
+                from llm.model_router import should_auto_plan
+                if should_auto_plan(user_input):
+                    from planning.planner import generate_plan, display_plan
+                    console.print(
+                        "\n[bold cyan]This looks like a multi-step task. "
+                        "Generating a plan...[/bold cyan]"
+                    )
+                    plan = generate_plan(user_input, self.config)
+                    if plan:
+                        display_plan(plan)
+                        self._current_plan = plan
+                        console.print(
+                            "\n[dim]Run [bold]/build[/bold] to execute, "
+                            "[bold]/revise[/bold] to adjust, or just "
+                            "keep chatting.[/dim]"
+                        )
+                        return ""
+            except ImportError:
+                pass
+
         # Route model if enabled
         if self._router and self._router.mode != "manual":
             self.config["model"] = self._router.route(user_input)

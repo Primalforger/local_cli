@@ -242,6 +242,77 @@ def detect_task_type(prompt: str) -> str:
     return max(scores, key=lambda k: scores[k])
 
 
+# ── Auto-Plan Detection ───────────────────────────────────────
+
+_PLAN_SIGNALS: list[tuple[str, int]] = [
+    (r"add .* to the", 3),
+    (r"implement", 2),
+    (r"integrate", 2),
+    (r"refactor the", 2),
+    (r"build a .* with", 3),
+    (r"create a .* that", 3),
+    (r"set up", 2),
+    (r"migrate", 2),
+]
+
+_PLAN_SCOPE_WORDS: list[str] = [
+    "system", "module", "service", "feature", "endpoint",
+    "api", "database", "layer", "pipeline", "workflow",
+    "authentication", "authorization", "middleware",
+    "frontend", "backend", "component", "integration",
+]
+
+_NO_PLAN_PREFIXES: list[str] = [
+    "what ", "how ", "why ", "can you explain",
+    "is it", "show me", "list ", "tell me",
+]
+
+_NO_PLAN_PHRASES: list[str] = [
+    "fix this", "fix the bug", "write a function",
+    "write a script", "quick", "simple",
+]
+
+
+def should_auto_plan(prompt: str) -> bool:
+    """Detect whether a user prompt warrants automatic plan generation.
+
+    Uses heuristic scoring: positive signals (project-scope verbs,
+    architectural keywords) vs negative signals (questions, simple
+    fixes). Returns True when score >= 3 and no negative signals match.
+    """
+    if not prompt or len(prompt.strip()) < 30:
+        return False
+
+    prompt_lower = prompt.lower().strip()
+
+    # Check negative prefixes
+    for prefix in _NO_PLAN_PREFIXES:
+        if prompt_lower.startswith(prefix):
+            return False
+
+    # Check negative phrases
+    for phrase in _NO_PLAN_PHRASES:
+        if phrase in prompt_lower:
+            return False
+
+    # Score positive signals
+    score = 0
+    for pattern, weight in _PLAN_SIGNALS:
+        if re.search(pattern, prompt_lower):
+            score += weight
+
+    # Score scope words
+    for word in _PLAN_SCOPE_WORDS:
+        if word in prompt_lower:
+            score += 1
+
+    # Length bonus for complex requests
+    if len(prompt_lower) > 60:
+        score += 1
+
+    return score >= 3
+
+
 def _infer_profile_from_name(model_name: str) -> dict:
     """Infer a basic model profile from its name.
 
