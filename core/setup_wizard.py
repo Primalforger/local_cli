@@ -143,17 +143,23 @@ def run_setup_wizard(config: dict, console: Console | None = None) -> dict:
         return config
 
     chosen = recommendations[chosen_idx]
-    chosen_model = chosen["name"]
+    # Use the quant-specific tag so download/Modelfile/VRAM math all
+    # match the recommended quantization (e.g. ":7b-q8_0" for Q8_0).
+    # For Q4_K_M this equals the base name; for others it appends the quant.
+    chosen_model = chosen["quant_tag"]
 
     # Prompt 2 (conditional): download if not installed
-    if not chosen["installed"]:
+    model_available = chosen["installed"]
+    if not model_available:
         try:
             downloaded = _prompt_download(console, chosen_model)
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Download skipped.[/dim]")
             downloaded = False
 
-        if not downloaded:
+        if downloaded:
+            model_available = True
+        else:
             console.print(
                 f"[yellow]Model '{chosen_model}' is not installed. "
                 f"Using it anyway — Ollama will auto-pull on first use.[/yellow]"
@@ -162,7 +168,9 @@ def run_setup_wizard(config: dict, console: Console | None = None) -> dict:
     config["model"] = chosen_model
 
     # Prompt 2.5: tuned profile (Modelfile creation)
-    if vram_budget is not None:
+    # Only offer if VRAM is known and the model is locally available
+    # (ollama create requires the base model to exist).
+    if vram_budget is not None and model_available:
         try:
             tuned_name = _prompt_tuned_profile(
                 console, chosen_model, vram_budget,
