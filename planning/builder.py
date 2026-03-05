@@ -1689,8 +1689,13 @@ def _search_error_context(
         query_parts.append(error_type.replace("_", " "))
     if missing_module:
         query_parts.append(missing_module)
+    # Only add root_cause if it adds substantial new info
     if root_cause and len(root_cause) < 80:
-        query_parts.append(root_cause)
+        existing_words = set(" ".join(query_parts).lower().split())
+        cause_words = set(root_cause.lower().split())
+        overlap = cause_words & existing_words
+        if cause_words and len(overlap) / len(cause_words) < 0.5:
+            query_parts.append(root_cause)
 
     # Fallback: extract the first recognizable error line
     if not query_parts:
@@ -1712,12 +1717,13 @@ def _search_error_context(
     # Detect primary language from tech stack for query prefix
     lang_prefix = "python"
     if tech_stack:
-        stack_lower = " ".join(t.lower() for t in tech_stack)
+        stack_items = {t.lower() for t in tech_stack}
+        stack_lower = " ".join(stack_items)
         if any(kw in stack_lower for kw in ("node", "javascript", "typescript", "express", "react", "next")):
             lang_prefix = "javascript"
         elif any(kw in stack_lower for kw in ("rust", "cargo")):
             lang_prefix = "rust"
-        elif any(kw in stack_lower for kw in ("golang", " go ", "gin", "fiber")):
+        elif "go" in stack_items or any(kw in stack_lower for kw in ("golang", "gin", "fiber")):
             lang_prefix = "go"
         elif any(kw in stack_lower for kw in ("java", "spring", "maven", "gradle")):
             lang_prefix = "java"
