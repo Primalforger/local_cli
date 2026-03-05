@@ -46,7 +46,8 @@ def set_clipboard(content: str):
     try:
         if sys.platform == "win32":
             subprocess.run(
-                ["powershell", "-command", "Set-Clipboard -Value $input"],
+                ["powershell", "-command",
+                 "[Console]::In.ReadToEnd() | Set-Clipboard"],
                 input=content, text=True, timeout=5,
             )
         elif sys.platform == "darwin":

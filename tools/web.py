@@ -232,8 +232,7 @@ def tool_serve_static(args: str) -> str:
         # Wait a moment and check it started
         _time.sleep(1)
         if proc.poll() is not None:
-            stderr = proc.stderr.read().decode() if proc.stderr else ""
-            return f"Error: Server failed to start.\n{stderr}"
+            return "Error: Server failed to start (process exited immediately)."
 
         _background_servers[port] = {
             "process": proc,

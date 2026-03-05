@@ -198,9 +198,7 @@ def tool_grep_context(args: str) -> str:
             for idx in sorted(match_indices):
                 start = max(0, idx - context)
                 end = min(len(file_lines), idx + context + 1)
-                if start in shown:
-                    pass
-                elif shown:
+                if shown and start > max(shown) + 1:
                     results.append("---")
 
                 for j in range(start, end):

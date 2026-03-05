@@ -76,7 +76,7 @@ def tool_db_query(args: str) -> str:
 
     # Safety: block writes unless explicitly requested
     sql_upper = sql.strip().upper()
-    is_mutating = not sql_upper.startswith(("SELECT", "PRAGMA", "EXPLAIN", "WITH", "VALUES"))
+    is_mutating = not sql_upper.startswith(("SELECT", "PRAGMA", "EXPLAIN", "VALUES"))
 
     if is_mutating and not write_mode:
         return (
