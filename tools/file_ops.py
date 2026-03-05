@@ -114,12 +114,59 @@ def tool_write_file(args: str) -> str:
     if error:
         return error
 
-    action = "Overwrite" if path.exists() else "Create"
     line_count = len(content.split("\n"))
     byte_count = len(content.encode("utf-8"))
 
-    console.print(f"\n[yellow]{action} file:[/yellow] {filepath}")
-    console.print(f"[dim]({byte_count:,} bytes, {line_count} lines)[/dim]")
+    if path.exists():
+        # Show a diff so the user can see what actually changed
+        try:
+            old_content = path.read_text(encoding="utf-8")
+        except Exception:
+            old_content = ""
+
+        if old_content.strip() == content.strip():
+            console.print(f"[dim]No changes in {filepath}[/dim]")
+            return f"No changes needed for {filepath}"
+
+        # Compute diff stats
+        old_lines = old_content.splitlines(keepends=True)
+        new_lines = content.splitlines(keepends=True)
+        diff_text = "".join(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f"a/{filepath}", tofile=f"b/{filepath}",
+        ))
+        if diff_text:
+            diff_split = diff_text.split("\n")
+            additions = sum(
+                1 for l in diff_split
+                if l.startswith("+") and not l.startswith("+++")
+            )
+            deletions = sum(
+                1 for l in diff_split
+                if l.startswith("-") and not l.startswith("---")
+            )
+            from rich.panel import Panel
+            try:
+                console.print(Panel(
+                    Syntax(diff_text, "diff", theme="monokai"),
+                    title=(
+                        f"Overwrite {filepath} "
+                        f"[green]+{additions}[/green] "
+                        f"[red]-{deletions}[/red]"
+                    ),
+                    border_style="yellow",
+                ))
+            except Exception:
+                console.print(f"\n[yellow]Overwrite file:[/yellow] {filepath}")
+                console.print(diff_text[:3000])
+        else:
+            console.print(f"\n[yellow]Overwrite file:[/yellow] {filepath}")
+            console.print(
+                f"[dim]({byte_count:,} bytes, {line_count} lines)[/dim]"
+            )
+    else:
+        console.print(f"\n[yellow]Create file:[/yellow] {filepath}")
+        console.print(f"[dim]({byte_count:,} bytes, {line_count} lines)[/dim]")
 
     if _confirm(f"Proceed? (y/n): "):
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -431,6 +431,6 @@ RULES:
 3. After showing results (like file tree), STOP and let the user decide next steps
 4. NEVER execute destructive operations (delete, rename, overwrite) without the user explicitly asking
 5. When reviewing/showing information, present findings and ASK what the user wants to do
-6. Prefer edit_file over write_file for existing files
+6. CRITICAL: For EXISTING files, ALWAYS use edit_file with SEARCH/REPLACE blocks — NEVER use write_file to overwrite an entire file. write_file is ONLY for creating NEW files. If you need to change part of an existing file, use edit_file with targeted search/replace blocks that match only the specific lines you are changing.
 7. For ANY question about files, directories, or system state — USE A TOOL, never guess
 """

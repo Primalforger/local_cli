@@ -628,7 +628,9 @@ def apply_edits(
 # ── Tool Description for LLM Prompt ──────────────────────────
 
 EDIT_TOOL_DESCRIPTION = """
-For EDITING existing files, prefer search/replace blocks (more precise):
+CRITICAL: For EDITING existing files, you MUST use <edit> with search/replace blocks.
+NEVER put the entire file content in a <file> tag for an existing file.
+Only include the specific lines you are changing (with enough context to match uniquely).
 
 <edit path="src/main.py">
 <<<<<<< SEARCH
@@ -640,7 +642,7 @@ def old_function():
 >>>>>>> REPLACE
 </edit>
 
-For CREATING new files, use:
+For CREATING brand-new files ONLY, use <file>:
 
 <file path="src/new_file.py">
 complete file content
@@ -648,4 +650,5 @@ complete file content
 
 You can have multiple SEARCH/REPLACE blocks in one <edit> tag.
 SEARCH blocks must EXACTLY match existing code (including whitespace).
+NEVER use <file> for a file that already exists — always use <edit> with targeted changes.
 """
