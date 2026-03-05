@@ -2,7 +2,7 @@
 
 import pytest
 
-from diff_editor import (
+from utils.diff_editor import (
     apply_search_replace,
     clean_code_block,
     parse_edit_blocks,

@@ -4,7 +4,7 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from tool_registry import ToolPlugin, ToolRegistry, _FunctionTool, get_registry
+from utils.tool_registry import ToolPlugin, ToolRegistry, _FunctionTool, get_registry
 
 
 class TestFunctionTool:

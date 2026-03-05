@@ -1,7 +1,7 @@
 """Tests for the command registry (Phase 1)."""
 
 import pytest
-from command_registry import CommandRegistry, CommandContext, CommandEntry
+from core.command_registry import CommandRegistry, CommandContext, CommandEntry
 
 
 @pytest.fixture

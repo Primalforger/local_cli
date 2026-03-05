@@ -118,6 +118,7 @@ class OllamaBackend:
         # Per-request state (set during stream/complete)
         self._last_token_count: int = 0
         self._last_duration: float = 0.0
+        self._was_interrupted: bool = False
 
     @classmethod
     def from_config(cls, config: dict) -> "OllamaBackend":
@@ -167,6 +168,7 @@ class OllamaBackend:
 
         full_response = ""
         self._last_token_count = 0
+        self._was_interrupted = False
         start_time = time.time()
 
         for retry in range(self._max_retries + 1):
@@ -266,6 +268,10 @@ class OllamaBackend:
             except Exception as e:
                 console.print(f"\n[red]Error: {e}[/red]")
                 return ""
+
+            except KeyboardInterrupt:
+                self._was_interrupted = True
+                break  # Exit retry loop, return partial full_response
 
         self._last_duration = time.time() - start_time
         return full_response

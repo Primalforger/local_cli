@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +30,125 @@ def _validate_session_data(data: dict) -> bool:
         if "role" not in msg or "content" not in msg:
             return False
     return True
+
+
+# ── Search Index ─────────────────────────────────────────────
+
+_INDEX_VERSION = 1
+
+
+def _get_index_path() -> Path:
+    """Return path to the search index file."""
+    return SESSIONS_DIR / "_search_index.dat"
+
+
+def _load_index() -> dict:
+    """Load the search index, returning empty index on missing/corrupt."""
+    path = _get_index_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") == _INDEX_VERSION:
+            return data
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
+    return {"version": _INDEX_VERSION, "files": {}, "tokens": {}}
+
+
+def _save_index(index: dict) -> None:
+    """Write the index to disk (best-effort)."""
+    try:
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write(_get_index_path(), json.dumps(index, separators=(",", ":")))
+    except Exception:
+        pass  # Best-effort — never block callers
+
+
+def _tokenize(text: str) -> set[str]:
+    """Split text into lowercase tokens for indexing (min length 3, no pure digits)."""
+    return {
+        tok.lower()
+        for tok in re.split(r"[\s\W]+", text)
+        if len(tok) >= 3 and not tok.isdigit()
+    }
+
+
+def _update_index(filename: str, session_data: dict) -> None:
+    """Add or update a session's tokens in the search index."""
+    index = _load_index()
+
+    # Remove stale entries for this file first
+    _remove_tokens_for_file(index, filename)
+
+    # Extract tokens from session name + all message content
+    text_parts = [session_data.get("name", "")]
+    for msg in session_data.get("messages", []):
+        text_parts.append(msg.get("content", ""))
+    tokens = _tokenize(" ".join(text_parts))
+
+    # Record file mtime
+    try:
+        mtime_ns = (SESSIONS_DIR / filename).stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    index["files"][filename] = mtime_ns
+
+    # Add tokens to posting lists
+    for tok in tokens:
+        posting = index["tokens"].setdefault(tok, [])
+        if filename not in posting:
+            posting.append(filename)
+
+    _save_index(index)
+
+
+def _remove_tokens_for_file(index: dict, filename: str) -> None:
+    """Remove a file from all posting lists (in-place, no save)."""
+    index["files"].pop(filename, None)
+    empty_keys = []
+    for tok, posting in index["tokens"].items():
+        if filename in posting:
+            posting.remove(filename)
+            if not posting:
+                empty_keys.append(tok)
+    for key in empty_keys:
+        del index["tokens"][key]
+
+
+def _remove_from_index(filenames: list[str]) -> None:
+    """Remove deleted files from the search index."""
+    if not filenames:
+        return
+    index = _load_index()
+    for fn in filenames:
+        _remove_tokens_for_file(index, fn)
+    _save_index(index)
+
+
+def _rebuild_index() -> None:
+    """Full rebuild of the search index from disk (for manual use)."""
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    index: dict = {"version": _INDEX_VERSION, "files": {}, "tokens": {}}
+    for path in SESSIONS_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not _validate_session_data(data):
+                continue
+            text_parts = [data.get("name", "")]
+            for msg in data.get("messages", []):
+                text_parts.append(msg.get("content", ""))
+            tokens = _tokenize(" ".join(text_parts))
+            try:
+                mtime_ns = path.stat().st_mtime_ns
+            except OSError:
+                mtime_ns = 0
+            index["files"][path.name] = mtime_ns
+            for tok in tokens:
+                posting = index["tokens"].setdefault(tok, [])
+                if path.name not in posting:
+                    posting.append(path.name)
+        except (json.JSONDecodeError, OSError):
+            continue
+    _save_index(index)
 
 
 def save_session(
@@ -82,6 +202,11 @@ def save_session(
     }
     atomic_write(path, json.dumps(session_data, indent=2))
     console.print(f"[green]Session saved: {path.name}[/green]")
+
+    try:
+        _update_index(filename, session_data)
+    except Exception:
+        pass  # Best-effort — never block save
 
     try:
         cleanup_old_sessions()
@@ -175,7 +300,28 @@ def search_sessions(query: str):
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     results = []
 
-    for path in SESSIONS_DIR.glob("*.json"):
+    # Try index-assisted search first
+    query_tokens = _tokenize(query)
+    candidates: set[str] | None = None
+    if query_tokens:
+        index = _load_index()
+        if index["files"]:
+            # Intersect posting lists for all query tokens
+            for tok in query_tokens:
+                posting = set(index["tokens"].get(tok, []))
+                candidates = posting if candidates is None else candidates & posting
+            if candidates is not None and not candidates:
+                # Index says no matches — but still do substring verification
+                candidates = None
+
+    # Determine which files to scan
+    if candidates is not None:
+        paths = [SESSIONS_DIR / fn for fn in candidates if (SESSIONS_DIR / fn).exists()]
+    else:
+        # Fall back to full scan (no index or no query tokens)
+        paths = list(SESSIONS_DIR.glob("*.json"))
+
+    for path in paths:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             for msg in data.get("messages", []):
@@ -204,8 +350,13 @@ def cleanup_old_sessions(max_sessions: int = 100):
     sessions = sorted(SESSIONS_DIR.glob("*.json"))
     if len(sessions) > max_sessions:
         to_delete = sessions[: len(sessions) - max_sessions]
+        deleted_names = [p.name for p in to_delete]
         for path in to_delete:
             path.unlink()
+        try:
+            _remove_from_index(deleted_names)
+        except Exception:
+            pass  # Best-effort
         console.print(
             f"[dim]Cleaned up {len(to_delete)} old sessions[/dim]"
         )

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from llm_backend import LLMBackend, OllamaBackend
+from llm.llm_backend import LLMBackend, OllamaBackend
 
 
 class TestOllamaBackendConstruction:
@@ -77,7 +77,7 @@ class TestLastMetrics:
         assert backend.last_token_count == 0
         assert backend.last_duration == 0.0
 
-    @patch("llm_backend.httpx.stream")
+    @patch("llm.llm_backend.httpx.stream")
     def test_stream_connect_error_returns_empty(self, mock_stream):
         import httpx
         mock_stream.side_effect = httpx.ConnectError("Connection refused")
@@ -85,7 +85,7 @@ class TestLastMetrics:
         result = backend.stream([{"role": "user", "content": "hi"}])
         assert result == ""
 
-    @patch("llm_backend.httpx.post")
+    @patch("llm.llm_backend.httpx.post")
     def test_complete_connect_error_returns_empty(self, mock_post):
         import httpx
         mock_post.side_effect = httpx.ConnectError("Connection refused")
@@ -93,14 +93,14 @@ class TestLastMetrics:
         result = backend.complete([{"role": "user", "content": "hi"}])
         assert result == ""
 
-    @patch("llm_backend.httpx.post")
+    @patch("llm.llm_backend.httpx.post")
     def test_tokenize_failure_returns_none(self, mock_post):
         mock_post.side_effect = Exception("Network error")
         backend = OllamaBackend()
         result = backend.tokenize("test text")
         assert result is None
 
-    @patch("llm_backend.httpx.get")
+    @patch("llm.llm_backend.httpx.get")
     def test_list_models_failure_returns_empty(self, mock_get):
         mock_get.side_effect = Exception("Network error")
         backend = OllamaBackend()

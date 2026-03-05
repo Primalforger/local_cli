@@ -25,6 +25,8 @@ from utils.metrics import MetricsTracker
 console = Console()
 tracker = MetricsTracker()
 
+_last_stream_interrupted: bool = False
+
 
 # ── Display helpers (safe imports) ─────────────────────────────
 
@@ -496,6 +498,12 @@ def stream_response(messages: list[dict], config: dict) -> str:
     finally:
         if _status_ctx[0] is not None:
             _status_ctx[0].__exit__(None, None, None)
+
+    global _last_stream_interrupted
+    _last_stream_interrupted = backend._was_interrupted
+    if backend._was_interrupted:
+        print()
+        console.print("[dim]  generation interrupted -- partial response captured[/dim]")
 
     if not _show_streaming() and full_response.strip():
         console.print(full_response)
@@ -995,6 +1003,12 @@ class ChatSession:
         for iteration in range(self.max_tool_iterations):
             console.print("\n[bold blue]Assistant:[/bold blue]")
             response = stream_response(self.messages, self.config)
+
+            if _last_stream_interrupted and response:
+                self.messages.append({"role": "assistant", "content": response})
+                return response
+            elif _last_stream_interrupted:
+                return ""
 
             if not response:
                 return ""

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from file_utils import atomic_write
+from utils.file_utils import atomic_write
 
 
 class TestAtomicWrite:

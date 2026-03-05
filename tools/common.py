@@ -262,7 +262,7 @@ def _scan_output(text: str) -> str:
     if not _config.get("secret_scanning", True):
         return text
     try:
-        from sandbox import get_scanner
+        from utils.sandbox import get_scanner
         return get_scanner().redact(text)
     except ImportError:
         return text

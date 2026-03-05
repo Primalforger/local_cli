@@ -2,7 +2,7 @@
 
 import pytest
 
-from aiignore import should_ignore, DEFAULT_IGNORE, load_aiignore
+from utils.aiignore import should_ignore, DEFAULT_IGNORE, load_aiignore
 
 
 class TestShouldIgnore:

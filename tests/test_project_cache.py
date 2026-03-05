@@ -4,7 +4,7 @@ import time
 import pytest
 from pathlib import Path
 
-from project_context import ProjectCache, scan_project_cached, scan_project
+from planning.project_context import ProjectCache, scan_project_cached, scan_project
 
 
 @pytest.fixture

@@ -2,7 +2,7 @@
 
 import pytest
 
-from context_manager import (
+from core.context_manager import (
     _heuristic_tokens,
     estimate_tokens,
     estimate_message_tokens,

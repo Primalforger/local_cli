@@ -261,7 +261,7 @@ PROMPT_LIBRARY: dict[str, dict[str, str]] = {
 def _get_custom_prompts_dir() -> Optional[Path]:
     """Get the custom prompts directory path."""
     try:
-        from config import CONFIG_DIR
+        from core.config import CONFIG_DIR
         return CONFIG_DIR / "prompts"
     except ImportError:
         path = Path.home() / ".config" / "localcli" / "prompts"

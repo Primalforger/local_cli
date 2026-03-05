@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from config import (
+from core.config import (
     DEFAULT_CONFIG,
     _CONFIG_VALIDATORS,
     _BOOL_KEYS,

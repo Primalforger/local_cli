@@ -2,7 +2,7 @@
 
 import pytest
 
-from error_diagnosis import (
+from utils.error_diagnosis import (
     diagnose_test_error, format_error_guidance, _is_test_failure,
     read_error_context,
 )

@@ -2,7 +2,7 @@
 
 import pytest
 
-from response_validator import (
+from adaptive.response_validator import (
     ResponseValidator,
     ValidationResult,
     QualityIssue,

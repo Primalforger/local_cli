@@ -4,7 +4,7 @@ import json
 import pytest
 from pathlib import Path
 
-from adaptive_engine import TaskClassifier, AdaptiveEngine, _SKLEARN_AVAILABLE
+from adaptive.adaptive_engine import TaskClassifier, AdaptiveEngine, _SKLEARN_AVAILABLE
 
 
 class TestTaskClassifier:

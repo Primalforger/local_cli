@@ -432,7 +432,7 @@ _custom_templates_dir_mtime: Optional[float] = None
 def _get_custom_templates_dir() -> Optional[Path]:
     """Get the custom templates directory."""
     try:
-        from config import CONFIG_DIR
+        from core.config import CONFIG_DIR
         return CONFIG_DIR / "templates"
     except ImportError:
         return Path.home() / ".config" / "localcli" / "templates"

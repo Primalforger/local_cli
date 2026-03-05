@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from config import DEFAULT_CONFIG
+from core.config import DEFAULT_CONFIG
 
 
 @pytest.fixture

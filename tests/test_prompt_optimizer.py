@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from prompt_optimizer import PromptOptimizer, _STRATEGY_CANDIDATES
+from adaptive.prompt_optimizer import PromptOptimizer, _STRATEGY_CANDIDATES
 
 
 class TestPromptOptimizer:

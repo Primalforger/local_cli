@@ -3,8 +3,8 @@
 import pytest
 from pathlib import Path
 
-from adaptive_seed import generate_seed_examples, seed_engine
-from adaptive_engine import AdaptiveEngine, _SKLEARN_AVAILABLE
+from adaptive.adaptive_seed import generate_seed_examples, seed_engine
+from adaptive.adaptive_engine import AdaptiveEngine, _SKLEARN_AVAILABLE
 
 
 class TestSeedGeneration:

@@ -4,7 +4,7 @@ import json
 import pytest
 from pathlib import Path
 
-from outcome_tracker import OutcomeTracker, OutcomeRecord
+from adaptive.outcome_tracker import OutcomeTracker, OutcomeRecord
 
 
 class TestOutcomeRecord:
@@ -119,7 +119,7 @@ class TestOutcomeTracker:
         tracker = OutcomeTracker(outcomes_file=path)
 
         # Record more than _MAX_RECORDS
-        import outcome_tracker
+        import adaptive.outcome_tracker as outcome_tracker
         old_max = outcome_tracker._MAX_RECORDS
         outcome_tracker._MAX_RECORDS = 10
 

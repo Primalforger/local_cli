@@ -80,14 +80,14 @@ class TestSandboxIntegration:
 
     def test_blocked_command_in_sandbox(self):
         """Verify sandbox blocks rm -rf /."""
-        from sandbox import CommandSandbox, SandboxVerdict
+        from utils.sandbox import CommandSandbox, SandboxVerdict
         sb = CommandSandbox(mode="normal")
         result = sb.check("rm -rf /")
         assert result.verdict == SandboxVerdict.BLOCK
 
     def test_safe_command_allowed(self):
         """Verify sandbox allows git status."""
-        from sandbox import CommandSandbox, SandboxVerdict
+        from utils.sandbox import CommandSandbox, SandboxVerdict
         sb = CommandSandbox(mode="normal")
         result = sb.check("git status")
         assert result.verdict == SandboxVerdict.ALLOW

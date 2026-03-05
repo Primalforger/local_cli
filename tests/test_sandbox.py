@@ -1,7 +1,7 @@
 """Tests for sandbox and secret scanning (Phase 2)."""
 
 import pytest
-from sandbox import (
+from utils.sandbox import (
     CommandSandbox, SandboxVerdict, SandboxResult,
     SecretScanner, SecretMatch,
     get_sandbox, get_scanner,

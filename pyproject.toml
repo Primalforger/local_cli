@@ -33,42 +33,7 @@ ai-mcp = "mcp_server:main"
 
 [tool.setuptools]
 packages = ["core", "planning", "llm", "tools", "adaptive", "utils"]
-py-modules = [
-    "cli",
-    "mcp_server",
-    # Root shims (backwards compatibility)
-    "config",
-    "chat",
-    "display",
-    "command_registry",
-    "session_manager",
-    "context_manager",
-    "memory",
-    "undo",
-    "planner",
-    "builder",
-    "project_context",
-    "project_reviewer",
-    "templates",
-    "llm_backend",
-    "model_router",
-    "prompts",
-    "adaptive_engine",
-    "adaptive_seed",
-    "outcome_tracker",
-    "prompt_optimizer",
-    "sandbox",
-    "file_utils",
-    "git_integration",
-    "diff_editor",
-    "error_diagnosis",
-    "clipboard",
-    "aiignore",
-    "watch_mode",
-    "metrics",
-    "logging_util",
-    "tool_registry",
-]
+py-modules = ["cli", "mcp_server"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

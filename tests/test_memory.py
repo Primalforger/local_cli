@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from memory import (
+from core.memory import (
     load_memory,
     save_memory,
     _default_memory,
