@@ -13,16 +13,20 @@ console = Console()
 
 # ── Token Estimation ───────────────────────────────────────────
 
-# Cache for Ollama tokenization results (text hash -> token count)
-_token_cache: dict[int, int] = {}
-_TOKEN_CACHE_MAX = 1000
-
 
 def _ollama_tokenize(text: str, model: str, ollama_url: str) -> int | None:
     """Try to get exact token count from Ollama's tokenize endpoint.
 
+    Uses the shared token cache from llm.llm_backend to avoid duplicating
+    cache state across modules.
+
     Returns None on any failure (timeout, connection error, etc.).
     """
+    try:
+        from llm.llm_backend import _token_cache, _TOKEN_CACHE_MAX
+    except ImportError:
+        return None
+
     text_hash = hash(text)
     if text_hash in _token_cache:
         return _token_cache[text_hash]
@@ -37,9 +41,8 @@ def _ollama_tokenize(text: str, model: str, ollama_url: str) -> int | None:
         tokens = resp.json().get("tokens", [])
         count = len(tokens)
 
-        # Cache the result
+        # Cache the result (shared cache with llm_backend)
         if len(_token_cache) >= _TOKEN_CACHE_MAX:
-            # Evict oldest entries (clear half the cache)
             keys = list(_token_cache.keys())
             for k in keys[:_TOKEN_CACHE_MAX // 2]:
                 del _token_cache[k]

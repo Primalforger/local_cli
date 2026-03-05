@@ -365,9 +365,3 @@ class OllamaBackend:
         """Duration in seconds of the most recent stream/complete call."""
         return self._last_duration
 
-    @property
-    def last_tokens_per_second(self) -> float:
-        """Tokens/second from the most recent call."""
-        if self._last_duration > 0:
-            return self._last_token_count / self._last_duration
-        return 0.0

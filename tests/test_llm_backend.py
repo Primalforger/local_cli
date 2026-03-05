@@ -76,7 +76,6 @@ class TestLastMetrics:
         backend = OllamaBackend()
         assert backend.last_token_count == 0
         assert backend.last_duration == 0.0
-        assert backend.last_tokens_per_second == 0.0
 
     @patch("llm_backend.httpx.stream")
     def test_stream_connect_error_returns_empty(self, mock_stream):

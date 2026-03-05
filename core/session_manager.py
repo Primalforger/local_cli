@@ -82,6 +82,12 @@ def save_session(
     }
     atomic_write(path, json.dumps(session_data, indent=2))
     console.print(f"[green]Session saved: {path.name}[/green]")
+
+    try:
+        cleanup_old_sessions()
+    except Exception:
+        pass  # Best effort — never block save
+
     return path
 
 

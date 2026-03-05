@@ -411,27 +411,6 @@ def check_file_imports(filepath: str, base_dir: str | None = None) -> list[dict]
     return broken
 
 
-def validate_changed_files(changed_files: list[str], base_dir: str | None = None) -> list[dict]:
-    """
-    Validate imports in changed files. Returns broken references.
-    """
-    from pathlib import Path
-
-    base = base_dir or str(Path.cwd())
-    all_broken = []
-
-    for filepath in changed_files:
-        path = Path(filepath)
-        if path.suffix != ".py":
-            continue
-        if not path.is_file():
-            continue
-        broken = check_file_imports(str(path), base)
-        all_broken.extend(broken)
-
-    return all_broken
-
-
 # ── Read-Only Tool Detection ──────────────────────────────────
 
 READ_ONLY_TOOLS = frozenset({
@@ -577,6 +556,9 @@ class ChatSession:
         except ImportError:
             pass
 
+        # Interaction counter for periodic ML training
+        self._interaction_count = 0
+
         # Load project memory
         memory_context = ""
         try:
@@ -585,7 +567,7 @@ class ChatSession:
             if memory_context:
                 memory_context = f"\n\nProject Memory:\n{memory_context}"
         except Exception:
-            pass
+            console.print("[yellow]⚠ Could not load project memory[/yellow]")
 
         self.messages = [
             {
@@ -1001,7 +983,7 @@ class ChatSession:
                     success=not _was_corrected,
                 )
             except Exception:
-                pass
+                console.print("[dim]⚠ Could not record prompt strategy outcome[/dim]")
 
         # Record outcome for adaptive learning
         if (
@@ -1023,6 +1005,7 @@ class ChatSession:
                     outcome="success" if response else "failure",
                     tool_sequence=self._tool_calls_this_turn,
                     prompt_preview=user_input[:200],
+                    response_preview=response[:500],
                     prompt_strategy=self._current_strategy,
                     quality_score=_quality_score,
                     quality_issues=_quality_issues,
@@ -1031,7 +1014,23 @@ class ChatSession:
             except Exception:
                 pass  # Best effort — never block chat
 
+        self._interaction_count += 1
+        self._maybe_train_validator()
+
         return response
+
+    def _maybe_train_validator(self):
+        """Periodically train the response validator ML model."""
+        if self._interaction_count % 50 != 0:
+            return
+        if self._response_validator is None or self._outcome_tracker is None:
+            return
+        try:
+            data = self._outcome_tracker.get_training_data()
+            if data:
+                self._response_validator.train(data)
+        except Exception:
+            pass  # Best effort
 
     def _show_context_usage(self):
         """Show context bar if usage is getting high."""

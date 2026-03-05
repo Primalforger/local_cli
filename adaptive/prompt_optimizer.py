@@ -194,8 +194,8 @@ class PromptOptimizer:
                 json.dumps(self._stats, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
-        except OSError:
-            pass  # Best effort
+        except OSError as e:
+            console.print(f"[dim]⚠ Could not save prompt strategies: {e}[/dim]")
 
     def _load(self):
         if not self._path.exists():
@@ -204,5 +204,25 @@ class PromptOptimizer:
             self._stats = json.loads(
                 self._path.read_text(encoding="utf-8")
             )
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
+            console.print(
+                "[yellow]⚠ Corrupted prompt strategies file — resetting[/yellow]"
+            )
+            self._backup_corrupted()
             self._stats = {}
+        except OSError as e:
+            console.print(f"[dim]⚠ Could not load prompt strategies: {e}[/dim]")
+            self._stats = {}
+
+    def _backup_corrupted(self):
+        """Back up a corrupted strategies file before overwriting."""
+        try:
+            backup = self._path.with_suffix(".json.bak")
+            if self._path.exists():
+                import shutil
+                shutil.copy2(self._path, backup)
+                console.print(
+                    f"[dim]Backed up corrupted file to {backup}[/dim]"
+                )
+        except OSError:
+            pass  # Best effort

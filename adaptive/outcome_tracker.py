@@ -30,6 +30,7 @@ class OutcomeRecord:
     fix_attempts: int = 0
     user_feedback: str = ""  # "good" / "bad" / ""
     prompt_preview: str = ""  # First 200 chars of prompt
+    response_preview: str = ""  # First 500 chars of response
     prompt_strategy: str = ""
     quality_score: float = -1.0
     quality_issues: list[str] = field(default_factory=list)
@@ -94,6 +95,7 @@ class OutcomeTracker:
         fix_attempts: int = 0,
         user_feedback: str = "",
         prompt_preview: str = "",
+        response_preview: str = "",
         prompt_strategy: str = "",
         quality_score: float = -1.0,
         quality_issues: list[str] | None = None,
@@ -110,6 +112,7 @@ class OutcomeTracker:
             fix_attempts: Number of fix attempts made
             user_feedback: Explicit user feedback ("good"/"bad")
             prompt_preview: First 200 chars of the prompt
+            response_preview: First 500 chars of the response
             prompt_strategy: ML-selected prompt strategy used
             quality_score: Quality score from ResponseValidator (-1 if not run)
             quality_issues: List of quality issue messages
@@ -128,6 +131,7 @@ class OutcomeTracker:
             fix_attempts=fix_attempts,
             user_feedback=user_feedback,
             prompt_preview=prompt_preview[:200],
+            response_preview=response_preview[:500],
             prompt_strategy=prompt_strategy,
             quality_score=quality_score,
             quality_issues=quality_issues or [],
@@ -170,6 +174,8 @@ class OutcomeTracker:
                     "outcome": r.outcome,
                     "success": r.outcome == "success",
                     "user_feedback": r.user_feedback,
+                    "response": r.response_preview,
+                    "quality_score": r.quality_score,
                 })
         return data
 

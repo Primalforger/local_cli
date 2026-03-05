@@ -79,10 +79,14 @@ class TestOutcomeTracker:
         tracker.record(
             task_type="debugging", model="m",
             outcome="success", prompt_preview="fix bug",
+            response_preview="Here is the fix",
+            quality_score=0.9,
         )
         tracker.record(
             task_type="code_generation", model="m",
             outcome="failure", prompt_preview="create function",
+            response_preview="def foo(): pass",
+            quality_score=0.3,
         )
 
         data = tracker.get_training_data()
@@ -90,7 +94,11 @@ class TestOutcomeTracker:
         assert data[0]["text"] == "fix bug"
         assert data[0]["task_type"] == "debugging"
         assert data[0]["success"] is True
+        assert data[0]["response"] == "Here is the fix"
+        assert data[0]["quality_score"] == 0.9
         assert data[1]["success"] is False
+        assert data[1]["response"] == "def foo(): pass"
+        assert data[1]["quality_score"] == 0.3
 
     def test_get_task_type_success_rates(self, tmp_path):
         path = tmp_path / "outcomes.json"
