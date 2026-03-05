@@ -85,6 +85,14 @@ def cmd_models(ctx: CommandContext):
         ctx.console.print(f"[red]Error: {e}[/red]")
 
 
+@command("/setup", description="Run model setup wizard", category="Core")
+def cmd_setup(ctx: CommandContext):
+    from core.setup_wizard import run_setup_wizard
+    updated = run_setup_wizard(ctx.config, ctx.console)
+    ctx.session.config.update(updated)
+    set_tool_config(ctx.config)
+
+
 @command("/tokens", description="Context usage estimate", category="Context")
 def cmd_tokens(ctx: CommandContext):
     if hasattr(ctx.session, "budget"):
@@ -1867,6 +1875,17 @@ def main():
 
     config = load_config()
     set_tool_config(config)
+
+    # First-run setup wizard (interactive mode only)
+    if not args.model and not args.prompt and sys.stdin.isatty():
+        try:
+            from core.setup_wizard import is_first_run, run_setup_wizard
+            if is_first_run():
+                config = run_setup_wizard(config, console)
+                set_tool_config(config)
+        except ImportError:
+            pass
+
     if args.model:
         config["model"] = args.model
 
