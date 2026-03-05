@@ -235,6 +235,17 @@ class TestEstimateModelVram:
         vram = _estimate_model_vram(14, "UNKNOWN", num_ctx=0)
         assert vram == pytest.approx(14 * 4.5 / 8 + BASE_OVERHEAD_GB, rel=0.01)
 
+    def test_kv_params_reduces_kv_cache(self):
+        """MoE models with small active params should use less KV cache VRAM."""
+        # Same total params, but different KV sizing
+        vram_dense = _estimate_model_vram(30, "Q4_K_M", num_ctx=8192)
+        vram_moe = _estimate_model_vram(30, "Q4_K_M", num_ctx=8192, kv_params=3.3)
+        # Weights are the same, but KV cache is much smaller for MoE
+        assert vram_moe < vram_dense
+        # Weights-only VRAM should be identical
+        assert _estimate_model_vram(30, "Q4_K_M", num_ctx=0) == \
+               _estimate_model_vram(30, "Q4_K_M", num_ctx=0, kv_params=3.3)
+
 
 # ── _best_quant_for_budget ───────────────────────────────────
 
@@ -340,6 +351,27 @@ class TestCalculateMaxContext:
         ctx_small = _calculate_max_context(14, "Q4_K_M", vram_budget=10.0, max_ctx=32768)
         ctx_large = _calculate_max_context(14, "Q4_K_M", vram_budget=20.0, max_ctx=32768)
         assert ctx_large >= ctx_small
+
+    def test_moe_kv_params_gives_more_context(self):
+        """MoE models (small active params) should get much more context than
+        dense models with the same total params, given the same VRAM budget."""
+        # 30B dense: weights=17.375 GB, budget=20 → 2.625 GB for KV
+        ctx_dense = _calculate_max_context(30, "Q4_K_M", vram_budget=20.0, max_ctx=262144)
+        # 30B MoE with 3.3B active: same weights, but KV sized for 3.3B
+        ctx_moe = _calculate_max_context(
+            30, "Q4_K_M", vram_budget=20.0, max_ctx=262144, kv_params=3.3
+        )
+        assert ctx_moe > ctx_dense * 5, (
+            f"MoE context ({ctx_moe}) should be much larger than dense ({ctx_dense})"
+        )
+
+    def test_kv_params_none_defaults_to_params(self):
+        """When kv_params is None, should behave the same as without it."""
+        ctx_default = _calculate_max_context(14, "Q4_K_M", vram_budget=12.0, max_ctx=32768)
+        ctx_none = _calculate_max_context(
+            14, "Q4_K_M", vram_budget=12.0, max_ctx=32768, kv_params=None
+        )
+        assert ctx_default == ctx_none
 
 
 # ── _generate_modelfile ──────────────────────────────────────

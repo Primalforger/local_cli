@@ -177,6 +177,7 @@ def run_setup_wizard(config: dict, console: Console | None = None) -> dict:
                 chosen.get("max_ctx", 32768),
                 chosen["params"],
                 chosen.get("quant", "Q4_K_M"),
+                kv_params=chosen.get("active_params"),
             )
             if tuned_name:
                 config["model"] = tuned_name
@@ -272,17 +273,23 @@ def _estimate_vram_budget(system_info: dict) -> float | None:
 
 # ── VRAM Estimation ──────────────────────────────────────────
 
-def _estimate_model_vram(params: float, quant: str, num_ctx: int = 0) -> float:
+def _estimate_model_vram(
+    params: float, quant: str, num_ctx: int = 0,
+    kv_params: float | None = None,
+) -> float:
     """Calculate total VRAM (weights + KV cache + overhead) in GB.
 
     Args:
-        params: Billions of parameters.
+        params: Billions of parameters (total, used for weight size).
         quant: Quantization level (key into QUANT_BITS).
         num_ctx: Context window size in tokens (0 = weights + overhead only).
+        kv_params: Params to use for KV cache sizing (for MoE models where
+            KV cache scales with active params, not total). Defaults to params.
     """
     bits = QUANT_BITS.get(quant, 4.5)
     weights_gb = params * bits / 8
-    kv_gb = (num_ctx / 1024) * KV_CACHE_PER_1K_CTX_PER_B * params
+    effective_kv_params = kv_params if kv_params is not None else params
+    kv_gb = (num_ctx / 1024) * KV_CACHE_PER_1K_CTX_PER_B * effective_kv_params
     return weights_gb + kv_gb + BASE_OVERHEAD_GB
 
 
@@ -310,13 +317,17 @@ def _best_quant_for_budget(
 
 
 def _calculate_max_context(
-    params: float, quant: str, vram_budget: float, max_ctx: int
+    params: float, quant: str, vram_budget: float, max_ctx: int,
+    kv_params: float | None = None,
 ) -> int:
     """Calculate the largest context window that fits in remaining VRAM.
 
     Subtracts model weight VRAM from budget, then calculates how many
     context tokens fit in the remainder. Caps at max_ctx and rounds
     down to nearest 1024.
+
+    Args:
+        kv_params: Params for KV cache sizing (MoE active params). Defaults to params.
     """
     bits = QUANT_BITS.get(quant, 4.5)
     weights_gb = params * bits / 8 + BASE_OVERHEAD_GB
@@ -324,7 +335,8 @@ def _calculate_max_context(
     if remaining_gb <= 0:
         return 2048  # absolute minimum
 
-    kv_per_token = KV_CACHE_PER_1K_CTX_PER_B * params / 1024  # GB per token
+    effective_kv_params = kv_params if kv_params is not None else params
+    kv_per_token = KV_CACHE_PER_1K_CTX_PER_B * effective_kv_params / 1024
     if kv_per_token <= 0:
         return max_ctx
 
@@ -501,9 +513,10 @@ def _sanitize_model_name(model_name: str) -> str:
 def _create_tuned_model(
     console: Console, base_model: str, vram_budget: float,
     max_ctx: int, params: float, quant: str,
+    kv_params: float | None = None,
 ) -> str | None:
     """Write a Modelfile, run ``ollama create``, return created model name or None."""
-    num_ctx = _calculate_max_context(params, quant, vram_budget, max_ctx)
+    num_ctx = _calculate_max_context(params, quant, vram_budget, max_ctx, kv_params)
     tuned_name = f"localcli-{_sanitize_model_name(base_model)}"
     modelfile_content = _generate_modelfile(base_model, num_ctx)
 
@@ -547,6 +560,7 @@ def _create_tuned_model(
 def _prompt_tuned_profile(
     console: Console, model_name: str, vram_budget: float,
     max_ctx: int, params: float, quant: str,
+    kv_params: float | None = None,
 ) -> str | None:
     """Prompt user to create a tuned profile. Returns created model name or None."""
     try:
@@ -560,7 +574,9 @@ def _prompt_tuned_profile(
     if raw in ("n", "no"):
         return None
 
-    return _create_tuned_model(console, model_name, vram_budget, max_ctx, params, quant)
+    return _create_tuned_model(
+        console, model_name, vram_budget, max_ctx, params, quant, kv_params
+    )
 
 
 # ── Interactive Prompts ───────────────────────────────────────
