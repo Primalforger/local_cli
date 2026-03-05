@@ -888,6 +888,14 @@ def _parse_requirements(filepath: Path) -> list[tuple[str, str]]:
         if line.startswith(("-r ", "-c ", "-e ", "--", "http://", "https://", "git+")):
             continue
 
+        # Strip inline comments and environment markers
+        if " #" in line:
+            line = line[:line.index(" #")].strip()
+        if ";" in line:
+            line = line[:line.index(";")].strip()
+        if not line:
+            continue
+
         # Split on first version specifier
         for sep in ("==", ">=", "<=", "~=", "!=", ">", "<"):
             if sep in line:
@@ -953,15 +961,29 @@ def _check_npm_package(name: str) -> dict | None:
         return None
 
 
+def _registry_reachable(url: str) -> bool:
+    """Quick connectivity check — returns False if offline."""
+    try:
+        resp = httpx.head(url, timeout=3, follow_redirects=True)
+        return resp.status_code < 500
+    except Exception:
+        return False
+
+
 def _validate_dependencies(base_dir: Path, project_type: str) -> bool:
     """Validate and auto-fix dependency files before install.
 
     Returns True if deps are valid (or validation was skipped).
     Returns False only if unfixable issues remain.
+    Skips silently when the registry is unreachable (offline).
     """
     if project_type == "python":
+        if not _registry_reachable("https://pypi.org/simple/"):
+            return True
         return _validate_python_deps(base_dir)
     elif project_type == "node":
+        if not _registry_reachable("https://registry.npmjs.org/"):
+            return True
         return _validate_node_deps(base_dir)
     return True
 
@@ -1102,6 +1124,10 @@ def _validate_node_deps(base_dir: Path) -> bool:
             )
             issues_found += 1
             unfixable += 1
+            continue
+
+        # Skip wildcard / range / tag specs — only check semver-like pins
+        if ver_spec in ("*", "latest") or ".x" in ver_spec or " " in ver_spec:
             continue
 
         # Check pinned version (strip leading ^ ~ >= etc.)
