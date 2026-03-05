@@ -493,3 +493,28 @@ class TestRecommendModels:
             assert r["vram_est"] == pytest.approx(expected, rel=0.01), (
                 f"{r['name']} vram_est mismatch"
             )
+
+    def test_installed_models_always_q4(self):
+        """Installed models should show Q4_K_M (what default tags provide)."""
+        recs = _recommend_models(16.0, ["qwen2.5-coder:7b"])
+        for r in recs:
+            if r["name"] == "qwen2.5-coder:7b":
+                assert r["quant"] == "Q4_K_M", (
+                    "Installed model should use Q4_K_M, not best-fit quant"
+                )
+                break
+        else:
+            pytest.fail("qwen2.5-coder:7b not in recommendations")
+
+    def test_uninstalled_models_get_best_quant(self):
+        """Uninstalled models should get the highest-quality quant that fits."""
+        recs = _recommend_models(16.0, [])
+        for r in recs:
+            if r["name"] == "qwen2.5-coder:7b":
+                # 7B with 16 GB budget: Q8_0 (7.5 GB) fits easily
+                assert r["quant"] == "Q8_0", (
+                    "Uninstalled 7B with 16 GB should recommend Q8_0"
+                )
+                break
+        else:
+            pytest.fail("qwen2.5-coder:7b not in recommendations")

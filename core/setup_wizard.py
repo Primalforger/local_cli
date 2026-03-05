@@ -3,7 +3,6 @@
 import os
 import re
 import subprocess
-import sys
 import tempfile
 
 import httpx
@@ -22,8 +21,6 @@ QUANT_BITS: dict[str, float] = {
     "Q8_0":   8.0,    # 8-bit
     "F16":    16.0,   # full precision
 }
-
-QUANT_PRIORITY = ["Q4_K_M", "Q8_0", "Q5_K_M"]  # preferred order for recommendations
 
 KV_CACHE_PER_1K_CTX_PER_B = 0.02   # GB per 1K context tokens per billion params
 BASE_OVERHEAD_GB = 0.5              # CUDA/runtime overhead
@@ -369,16 +366,21 @@ def _recommend_models(
     vram_cap = vram_budget if vram_budget is not None else fallback_cap
 
     for model in RECOMMENDED_MODELS:
-        # Find best quantization that fits
-        if vram_budget is not None:
-            best = _best_quant_for_budget(model, vram_cap)
-        else:
-            # Unknown VRAM: default to Q4_K_M with rough estimate
+        installed = model["name"] in installed_names
+
+        # Find best quantization that fits.
+        # Installed models use Q4_K_M (what default Ollama tags provide).
+        # Uninstalled models get the highest quality quant that fits,
+        # so the user can pull the right tag.
+        if installed or vram_budget is None:
             vram_est = _estimate_model_vram(model["params"], "Q4_K_M")
-            if vram_est <= vram_cap + 1.0:
+            tolerance = 1.0 if vram_budget is None else 0.5
+            if vram_est <= vram_cap + tolerance:
                 best = ("Q4_K_M", vram_est)
             else:
                 best = None
+        else:
+            best = _best_quant_for_budget(model, vram_cap)
 
         if best is None:
             continue
@@ -394,7 +396,6 @@ def _recommend_models(
         else:
             speed = "Slow"
 
-        installed = model["name"] in installed_names
         results.append({
             **model,
             "installed": installed,
@@ -498,6 +499,7 @@ def _create_tuned_model(
     tuned_name = f"localcli-{_sanitize_model_name(base_model)}"
     modelfile_content = _generate_modelfile(base_model, num_ctx)
 
+    modelfile_path = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".modelfile", delete=False
@@ -509,12 +511,6 @@ def _create_tuned_model(
             ["ollama", "create", tuned_name, "-f", modelfile_path],
             check=False, capture_output=True, text=True,
         )
-
-        # Clean up temp file
-        try:
-            os.unlink(modelfile_path)
-        except OSError:
-            pass
 
         if result.returncode == 0:
             console.print(
@@ -532,6 +528,12 @@ def _create_tuned_model(
     except FileNotFoundError:
         console.print("  [red]'ollama' not found on PATH. Cannot create tuned model.[/red]")
         return None
+    finally:
+        if modelfile_path:
+            try:
+                os.unlink(modelfile_path)
+            except OSError:
+                pass
 
 
 def _prompt_tuned_profile(
