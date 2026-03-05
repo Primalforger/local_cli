@@ -59,6 +59,7 @@ _READ_ONLY_TOOLS = {
     "json_query",
     "json_validate",
     "yaml_to_json",
+    "web_search",
     "mcp_list",
     "mcp_resources",
 }
@@ -362,6 +363,8 @@ WEB / HTTP:
 <tool:fetch_url>url</tool>
 <tool:check_url>url</tool>
 <tool:http_request>method|url|body_json</tool>
+<tool:web_search>search query</tool>
+<tool:web_search>search query|max_results</tool>
 
 WEBAPP EMULATION:
 <tool:serve_static>directory|port</tool>

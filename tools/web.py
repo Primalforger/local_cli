@@ -421,3 +421,123 @@ def tool_websocket_test(args: str) -> str:
         )
     except Exception as e:
         return f"Error: {e}"
+
+
+# ── Web Search ─────────────────────────────────────────────────
+
+def _web_search_raw(query: str, max_results: int = 5) -> list[dict]:
+    """Search DuckDuckGo and return structured results.
+
+    Args:
+        query: Search query string
+        max_results: Maximum number of results to return
+
+    Returns:
+        List of dicts with 'title', 'url', 'snippet' keys.
+        Returns [] on any failure (never raises).
+    """
+    if not query or not query.strip():
+        return []
+
+    try:
+        import httpx
+        resp = httpx.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query.strip()},
+            headers={"User-Agent": "AI-CLI/1.0"},
+            timeout=10,
+            follow_redirects=True,
+        )
+        html = resp.text
+    except Exception:
+        # Fallback to urllib
+        try:
+            from urllib.request import urlopen, Request
+            from urllib.parse import urlencode
+            url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query.strip()})
+            req = Request(url, headers={"User-Agent": "AI-CLI/1.0"})
+            with urlopen(req, timeout=10) as resp:
+                html = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            return []
+
+    # Parse results from HTML
+    results: list[dict] = []
+    try:
+        from urllib.parse import unquote
+
+        # Extract result blocks: title+URL from class="result__a", snippet from class="result__snippet"
+        title_url_matches = re.findall(
+            r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+            html, re.DOTALL,
+        )
+        snippet_matches = re.findall(
+            r'class="result__snippet"[^>]*>(.*?)</(?:td|span|div)>',
+            html, re.DOTALL,
+        )
+
+        for i, (raw_url, raw_title) in enumerate(title_url_matches):
+            if len(results) >= max_results:
+                break
+
+            # Decode DuckDuckGo redirect URLs
+            if "uddg=" in raw_url:
+                url_match = re.search(r'uddg=([^&]+)', raw_url)
+                if url_match:
+                    url = unquote(url_match.group(1))
+                else:
+                    url = raw_url
+            else:
+                url = raw_url
+
+            # Strip HTML tags from title and snippet
+            title = re.sub(r'<[^>]+>', ' ', raw_title).strip()
+            title = re.sub(r'\s+', ' ', title)
+
+            snippet = ""
+            if i < len(snippet_matches):
+                snippet = re.sub(r'<[^>]+>', ' ', snippet_matches[i]).strip()
+                snippet = re.sub(r'\s+', ' ', snippet)
+
+            if title and url:
+                results.append({
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                })
+    except Exception:
+        return []
+
+    return results
+
+
+def tool_web_search(args: str) -> str:
+    """Search the web using DuckDuckGo."""
+    cleaned = _sanitize_tool_args(args)
+    parts = cleaned.split("|")
+    query = parts[0].strip()
+    max_results = 5
+
+    if len(parts) > 1:
+        try:
+            max_results = int(parts[1].strip())
+        except ValueError:
+            pass
+
+    if not query:
+        return "Error: Empty search query"
+
+    results = _web_search_raw(query, max_results)
+
+    if not results:
+        return f"No results found for: {query}"
+
+    output = f"Search results for: {query}\n\n"
+    for i, r in enumerate(results, 1):
+        output += f"{i}. {r['title']}\n"
+        output += f"   URL: {r['url']}\n"
+        if r.get("snippet"):
+            output += f"   {r['snippet']}\n"
+        output += "\n"
+
+    return _scan_output(output.rstrip())

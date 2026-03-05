@@ -53,6 +53,7 @@ _SUBMODULE_TOOLS: dict[str, list[str]] = {
         "tool_curl", "tool_serve_static", "tool_serve_stop",
         "tool_serve_list", "tool_screenshot_url", "tool_browser_open",
         "tool_websocket_test",
+        "tool_web_search",
     ],
     "tools.package": [
         "tool_pip_install", "tool_pip_list", "tool_npm_install",

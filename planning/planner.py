@@ -31,6 +31,11 @@ except ImportError:
     FEATURE_PATTERNS = {}
     get_template_prompt = None
 
+try:
+    from tools.web import _web_search_raw
+except ImportError:
+    _web_search_raw = None
+
 console = Console()
 
 
@@ -506,6 +511,96 @@ def _detect_feature_patterns(
     return matched
 
 
+# ── Web Research for Plans ─────────────────────────────────────
+
+_FILLER_WORDS = {
+    "a", "an", "the", "with", "and", "or", "for", "of", "in", "to",
+    "is", "it", "that", "this", "my", "me", "i", "we", "our",
+    "using", "use", "build", "create", "make", "want", "need",
+    "please", "should", "would", "could", "like", "some", "app",
+    "application", "project", "system",
+}
+
+
+def _research_for_plan(
+    description: str,
+    detected_patterns: list[tuple[str, dict]],
+) -> str:
+    """Run web searches to gather context for plan generation.
+
+    Generates 1-2 search queries from the description keywords,
+    calls DuckDuckGo, and returns formatted results for prompt injection.
+
+    Args:
+        description: The user's project description
+        detected_patterns: Feature patterns detected in the description
+
+    Returns:
+        Formatted string to append to the system prompt, or "" on failure.
+    """
+    if _web_search_raw is None:
+        return ""
+
+    console.print("[dim]Researching best practices...[/dim]")
+
+    # Build search queries from keywords (no LLM call needed)
+    words = re.findall(r'[a-zA-Z0-9#+.-]+', description.lower())
+    keywords = [w for w in words if w not in _FILLER_WORDS and len(w) > 1]
+
+    queries: list[str] = []
+
+    # Primary query: "best practices" + top keywords
+    if keywords:
+        primary_words = keywords[:6]
+        queries.append("best practices " + " ".join(primary_words))
+
+    # Secondary query: first detected pattern + tech words
+    if detected_patterns:
+        pattern_name = detected_patterns[0][0]
+        tech_words = [w for w in keywords if w not in pattern_name.split("-")][:3]
+        queries.append(
+            pattern_name.replace("-", " ")
+            + " implementation guide "
+            + " ".join(tech_words)
+        )
+
+    if not queries:
+        return ""
+
+    # Run searches and collect results
+    all_results: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for query in queries:
+        try:
+            results = _web_search_raw(query, max_results=3)
+            for r in results:
+                if r["url"] not in seen_urls:
+                    seen_urls.add(r["url"])
+                    all_results.append(r)
+        except Exception:
+            continue
+
+    # Cap at 5 total results
+    all_results = all_results[:5]
+
+    if not all_results:
+        return ""
+
+    # Format as context for the system prompt
+    research_block = (
+        "\n\n## Web Research Findings\n"
+        "Consider these recent best practices and patterns "
+        "when designing the plan:\n\n"
+    )
+    for i, r in enumerate(all_results, 1):
+        research_block += f"{i}. **{r['title']}**\n"
+        if r.get("snippet"):
+            research_block += f"   {r['snippet']}\n"
+
+    return research_block
+
+
 # ── Plan Generation ────────────────────────────────────────────
 
 def generate_plan(
@@ -566,6 +661,12 @@ def generate_plan(
             f"[dim]Detected patterns: "
             f"{', '.join(n for n, _ in detected)}[/dim]"
         )
+
+    # ── Web research phase ───────────────────────────
+    if config.get("plan_web_research", True):
+        research = _research_for_plan(description, detected)
+        if research:
+            system_prompt += research
 
     full_response = _stream_plan_response(
         config,

@@ -68,6 +68,9 @@ DEFAULT_CONFIG = {
     "response_validation": True,              # Validate response quality
     "quality_auto_retry": True,               # Auto-retry on quality failure
     "quality_min_score": 0.5,                 # Minimum quality score to pass
+
+    # Planning settings
+    "plan_web_research": True,                # Web research before plan generation
 }
 
 # ── Config value validation ────────────────────────────────────
@@ -103,6 +106,7 @@ _CONFIG_VALIDATORS = {
     "response_validation": lambda v: isinstance(v, bool),
     "quality_auto_retry": lambda v: isinstance(v, bool),
     "quality_min_score": lambda v: isinstance(v, (int, float)) and 0.0 <= v <= 1.0,
+    "plan_web_research": lambda v: isinstance(v, bool),
 }
 
 # Config values that should be parsed as booleans
@@ -112,6 +116,7 @@ _BOOL_KEYS = {
     "adaptive_routing", "memory_relevance_scoring",
     "secret_scanning",
     "prompt_optimization", "response_validation", "quality_auto_retry",
+    "plan_web_research",
 }
 
 # Config values that should be parsed as integers
