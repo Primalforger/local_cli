@@ -454,8 +454,12 @@ def _web_search_raw(query: str, max_results: int = 5) -> list[dict]:
         try:
             from urllib.request import urlopen, Request
             from urllib.parse import urlencode
-            url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query.strip()})
-            req = Request(url, headers={"User-Agent": "AI-CLI/1.0"})
+            post_data = urlencode({"q": query.strip()}).encode("utf-8")
+            req = Request(
+                "https://html.duckduckgo.com/html/",
+                data=post_data,
+                headers={"User-Agent": "AI-CLI/1.0"},
+            )
             with urlopen(req, timeout=10) as resp:
                 html = resp.read().decode("utf-8", errors="replace")
         except Exception:

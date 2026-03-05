@@ -1659,7 +1659,9 @@ def write_project_file(
 
 # ── Error-Driven Web Research ──────────────────────────────────
 
-def _search_error_context(error_text: str, diagnosis: dict) -> str:
+def _search_error_context(
+    error_text: str, diagnosis: dict, tech_stack: list[str] | None = None,
+) -> str:
     """Search the web for an error as a last resort when fixes are stuck.
 
     Extracts a targeted search query from the error diagnosis and
@@ -1668,6 +1670,7 @@ def _search_error_context(error_text: str, diagnosis: dict) -> str:
     Args:
         error_text: Combined stdout+stderr from the failing command
         diagnosis: Result from diagnose_test_error()
+        tech_stack: Project tech stack for language-aware queries
 
     Returns:
         Formatted string to append to the system prompt, or "" on failure.
@@ -1691,13 +1694,13 @@ def _search_error_context(error_text: str, diagnosis: dict) -> str:
 
     # Fallback: extract the first recognizable error line
     if not query_parts:
-        for line in error_text.splitlines():
-            line = line.strip()
-            if any(kw in line.lower() for kw in (
+        for raw_line in error_text.splitlines():
+            stripped = raw_line.strip()
+            if any(kw in stripped.lower() for kw in (
                 "error", "exception", "failed", "traceback",
-            )) and 10 < len(line) < 200:
+            )) and 10 < len(stripped) < 200:
                 # Clean up noise (paths, timestamps)
-                cleaned = re.sub(r'File ".*?",?\s*', '', line)
+                cleaned = re.sub(r'File ".*?",?\s*', '', stripped)
                 cleaned = re.sub(r'line \d+', '', cleaned).strip()
                 if cleaned:
                     query_parts.append(cleaned[:100])
@@ -1706,7 +1709,22 @@ def _search_error_context(error_text: str, diagnosis: dict) -> str:
     if not query_parts:
         return ""
 
-    query = "python fix " + " ".join(query_parts)
+    # Detect primary language from tech stack for query prefix
+    lang_prefix = "python"
+    if tech_stack:
+        stack_lower = " ".join(t.lower() for t in tech_stack)
+        if any(kw in stack_lower for kw in ("node", "javascript", "typescript", "express", "react", "next")):
+            lang_prefix = "javascript"
+        elif any(kw in stack_lower for kw in ("rust", "cargo")):
+            lang_prefix = "rust"
+        elif any(kw in stack_lower for kw in ("golang", " go ", "gin", "fiber")):
+            lang_prefix = "go"
+        elif any(kw in stack_lower for kw in ("java", "spring", "maven", "gradle")):
+            lang_prefix = "java"
+        elif any(kw in stack_lower for kw in ("ruby", "rails")):
+            lang_prefix = "ruby"
+
+    query = lang_prefix + " fix " + " ".join(query_parts)
     console.print("[dim]🔍 Searching web for error solutions...[/dim]")
 
     try:
@@ -2016,7 +2034,10 @@ def auto_fix(
     if attempt >= 3:
         # Last resort: search the web for error solutions
         if config.get("plan_web_research", True):
-            web_context = _search_error_context(combined_output, diagnosis)
+            web_context = _search_error_context(
+                combined_output, diagnosis,
+                tech_stack=plan.get("tech_stack"),
+            )
             if web_context:
                 system += web_context
 

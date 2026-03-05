@@ -541,8 +541,6 @@ def _research_for_plan(
     if _web_search_raw is None:
         return ""
 
-    console.print("[dim]Researching best practices...[/dim]")
-
     # Build search queries from keywords (no LLM call needed)
     words = re.findall(r'[a-zA-Z0-9#+.-]+', description.lower())
     keywords = [w for w in words if w not in _FILLER_WORDS and len(w) > 1]
@@ -566,6 +564,8 @@ def _research_for_plan(
 
     if not queries:
         return ""
+
+    console.print("[dim]Researching best practices...[/dim]")
 
     # Run searches and collect results
     all_results: list[dict] = []
