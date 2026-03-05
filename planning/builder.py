@@ -870,6 +870,290 @@ def _is_missing_dependency_error(
     )
 
 
+def _parse_requirements(filepath: Path) -> list[tuple[str, str]]:
+    """Parse requirements.txt into (name, version_spec) tuples.
+
+    Skips comments, blank lines, -r includes, URLs, and -e installs.
+    Strips extras like ``package[extra]`` down to the base name.
+    """
+    if not filepath.exists():
+        return []
+
+    results: list[tuple[str, str]] = []
+    for raw_line in filepath.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Skip flags, includes, URLs, editable installs
+        if line.startswith(("-r ", "-c ", "-e ", "--", "http://", "https://", "git+")):
+            continue
+
+        # Split on first version specifier
+        for sep in ("==", ">=", "<=", "~=", "!=", ">", "<"):
+            if sep in line:
+                name, ver = line.split(sep, 1)
+                name = re.sub(r"\[.*?\]", "", name).strip()
+                results.append((name, f"{sep}{ver.strip()}"))
+                break
+        else:
+            # No version specifier
+            name = re.sub(r"\[.*?\]", "", line).strip()
+            if name:
+                results.append((name, ""))
+    return results
+
+
+def _check_pypi_package(name: str) -> dict | None:
+    """Check if a package exists on PyPI.
+
+    Returns ``{"name": str, "latest": str, "versions": list[str]}``
+    on success, or ``None`` on 404 / network failure.
+    """
+    try:
+        resp = httpx.get(
+            f"https://pypi.org/pypi/{name}/json", timeout=5,
+            follow_redirects=True,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        info = data.get("info", {})
+        versions = sorted(data.get("releases", {}).keys())
+        return {
+            "name": info.get("name", name),
+            "latest": info.get("version", versions[-1] if versions else ""),
+            "versions": versions,
+        }
+    except Exception:
+        return None
+
+
+def _check_npm_package(name: str) -> dict | None:
+    """Check if a package exists on the npm registry.
+
+    Returns ``{"name": str, "latest": str, "versions": list[str]}``
+    on success, or ``None`` on failure.
+    """
+    try:
+        resp = httpx.get(
+            f"https://registry.npmjs.org/{name}", timeout=5,
+            follow_redirects=True,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        dist_tags = data.get("dist-tags", {})
+        versions = sorted(data.get("versions", {}).keys())
+        return {
+            "name": data.get("name", name),
+            "latest": dist_tags.get("latest", versions[-1] if versions else ""),
+            "versions": versions,
+        }
+    except Exception:
+        return None
+
+
+def _validate_dependencies(base_dir: Path, project_type: str) -> bool:
+    """Validate and auto-fix dependency files before install.
+
+    Returns True if deps are valid (or validation was skipped).
+    Returns False only if unfixable issues remain.
+    """
+    if project_type == "python":
+        return _validate_python_deps(base_dir)
+    elif project_type == "node":
+        return _validate_node_deps(base_dir)
+    return True
+
+
+def _validate_python_deps(base_dir: Path) -> bool:
+    """Validate requirements.txt against PyPI, auto-fixing issues."""
+    req_path = base_dir / "requirements.txt"
+    if not req_path.exists():
+        return True
+
+    deps = _parse_requirements(req_path)
+    if not deps or len(deps) > 20:
+        return True
+
+    console.print("[dim]  Validating Python dependencies...[/dim]")
+    lines = req_path.read_text(encoding="utf-8").splitlines()
+    modified = False
+    issues_found = 0
+    unfixable = 0
+
+    for pkg_name, ver_spec in deps:
+        info = _check_pypi_package(pkg_name)
+        if info is None:
+            # Package not found — try common corrections
+            corrected_info = None
+            candidates = []
+            # Try swapping - and _
+            if "-" in pkg_name:
+                candidates.append(pkg_name.replace("-", "_"))
+            if "_" in pkg_name:
+                candidates.append(pkg_name.replace("_", "-"))
+            # Try stripping trailing 's'
+            if pkg_name.endswith("s") and len(pkg_name) > 3:
+                candidates.append(pkg_name[:-1])
+
+            for candidate in candidates:
+                corrected_info = _check_pypi_package(candidate)
+                if corrected_info:
+                    break
+
+            if corrected_info:
+                canonical = corrected_info["name"]
+                console.print(
+                    f"    [yellow]Fixed:[/yellow] "
+                    f"[red]{pkg_name}[/red] → "
+                    f"[green]{canonical}[/green]"
+                )
+                # Replace in lines
+                new_ver = ver_spec
+                if ver_spec.startswith("=="):
+                    pinned = ver_spec[2:]
+                    if pinned not in corrected_info["versions"]:
+                        new_ver = f"=={corrected_info['latest']}"
+                        console.print(
+                            f"    [yellow]Fixed version:[/yellow] "
+                            f"[red]{pinned}[/red] → "
+                            f"[green]{corrected_info['latest']}[/green]"
+                        )
+                lines = _replace_dep_line(
+                    lines, pkg_name, ver_spec,
+                    canonical, new_ver,
+                )
+                modified = True
+                issues_found += 1
+            else:
+                console.print(
+                    f"    [red]Unknown package:[/red] {pkg_name} "
+                    f"(not found on PyPI)"
+                )
+                issues_found += 1
+                unfixable += 1
+        else:
+            # Package exists — check version if pinned
+            if ver_spec.startswith("=="):
+                pinned = ver_spec[2:]
+                if pinned not in info["versions"]:
+                    console.print(
+                        f"    [yellow]Fixed version:[/yellow] "
+                        f"{info['name']} "
+                        f"[red]{pinned}[/red] → "
+                        f"[green]{info['latest']}[/green]"
+                    )
+                    lines = _replace_dep_line(
+                        lines, pkg_name, ver_spec,
+                        info["name"], f"=={info['latest']}",
+                    )
+                    modified = True
+                    issues_found += 1
+
+    if modified:
+        req_path.write_text(
+            "\n".join(lines) + "\n", encoding="utf-8",
+        )
+    if issues_found:
+        fixed = issues_found - unfixable
+        console.print(
+            f"    [dim]{issues_found} issue(s) found, "
+            f"{fixed} auto-fixed[/dim]"
+        )
+    else:
+        console.print(
+            "    [green]✓ All dependencies valid[/green]"
+        )
+    return unfixable == 0
+
+
+def _validate_node_deps(base_dir: Path) -> bool:
+    """Validate package.json dependencies against npm, auto-fixing issues."""
+    pkg_path = base_dir / "package.json"
+    if not pkg_path.exists():
+        return True
+
+    try:
+        pkg_data = json.loads(
+            pkg_path.read_text(encoding="utf-8"),
+        )
+    except (json.JSONDecodeError, OSError):
+        return True
+
+    all_deps: dict[str, str] = {}
+    for key in ("dependencies", "devDependencies"):
+        all_deps.update(pkg_data.get(key, {}))
+
+    if not all_deps or len(all_deps) > 20:
+        return True
+
+    console.print("[dim]  Validating Node dependencies...[/dim]")
+    modified = False
+    issues_found = 0
+    unfixable = 0
+
+    for pkg_name, ver_spec in list(all_deps.items()):
+        info = _check_npm_package(pkg_name)
+        if info is None:
+            console.print(
+                f"    [red]Unknown package:[/red] {pkg_name} "
+                f"(not found on npm)"
+            )
+            issues_found += 1
+            unfixable += 1
+            continue
+
+        # Check pinned version (strip leading ^ ~ >= etc.)
+        clean_ver = re.sub(r"^[\^~>=<]*", "", ver_spec).strip()
+        if clean_ver and clean_ver not in info["versions"]:
+            new_ver = f"^{info['latest']}"
+            console.print(
+                f"    [yellow]Fixed version:[/yellow] "
+                f"{pkg_name} "
+                f"[red]{ver_spec}[/red] → "
+                f"[green]{new_ver}[/green]"
+            )
+            # Update in pkg_data
+            for key in ("dependencies", "devDependencies"):
+                if pkg_name in pkg_data.get(key, {}):
+                    pkg_data[key][pkg_name] = new_ver
+            modified = True
+            issues_found += 1
+
+    if modified:
+        pkg_path.write_text(
+            json.dumps(pkg_data, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    if issues_found:
+        fixed = issues_found - unfixable
+        console.print(
+            f"    [dim]{issues_found} issue(s) found, "
+            f"{fixed} auto-fixed[/dim]"
+        )
+    else:
+        console.print(
+            "    [green]✓ All dependencies valid[/green]"
+        )
+    return unfixable == 0
+
+
+def _replace_dep_line(
+    lines: list[str],
+    old_name: str, old_ver: str,
+    new_name: str, new_ver: str,
+) -> list[str]:
+    """Replace a dependency line in requirements.txt content."""
+    old_entry = f"{old_name}{old_ver}"
+    new_entry = f"{new_name}{new_ver}"
+    return [
+        line.replace(old_entry, new_entry)
+        if old_entry in line else line
+        for line in lines
+    ]
+
+
 def _try_reinstall_deps(
     base_dir: Path, plan: dict
 ) -> bool:
@@ -890,6 +1174,10 @@ def _try_reinstall_deps(
         "\n[yellow]📦 Missing dependency detected — "
         "reinstalling...[/yellow]"
     )
+
+    # Validate & auto-fix deps before running install
+    proj_type = project_info.get("type", "unknown")
+    _validate_dependencies(base_dir, proj_type)
 
     all_ok = True
     for cmd in install_cmds:
@@ -2429,9 +2717,17 @@ def run_validation_pipeline(
         "requirements.txt", "package.json",
         "Cargo.toml", "go.mod",
     )
-    if "install" not in skip_stages and any(
+    has_deps = any(
         (base_dir / f).exists() for f in dep_files
-    ):
+    )
+
+    # Dependency validation before install
+    if "deps" not in skip_stages and "dependency check" not in skip_stages and has_deps:
+        proj_type = project_info.get("type", "unknown")
+        if proj_type in ("python", "node"):
+            stages.append(("Dependency Check", "dep_validate", proj_type))
+
+    if "install" not in skip_stages and has_deps:
         install_cmds = project_info.get("install_cmd")
         if install_cmds:
             if isinstance(install_cmds, str):
@@ -2515,6 +2811,10 @@ def run_validation_pipeline(
                     base_dir, plan, created_files,
                     config, stage_name, attempt,
                     fix_history=stage_fix_history,
+                )
+            elif stage_type == "dep_validate":
+                passed = _validate_dependencies(
+                    base_dir, stage_cmd,
                 )
             elif stage_type == "command":
                 passed = _validate_command(
