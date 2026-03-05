@@ -9,6 +9,7 @@ import tempfile
 import subprocess
 from pathlib import Path
 from typing import Optional
+from rich.panel import Panel
 from rich.syntax import Syntax
 from tools.common import (
     console, _sanitize_tool_args, _sanitize_path_arg,
@@ -124,7 +125,7 @@ def tool_write_file(args: str) -> str:
         except Exception:
             old_content = ""
 
-        if old_content.strip() == content.strip():
+        if old_content == content:
             console.print(f"[dim]No changes in {filepath}[/dim]")
             return f"No changes needed for {filepath}"
 
@@ -138,27 +139,35 @@ def tool_write_file(args: str) -> str:
         if diff_text:
             diff_split = diff_text.split("\n")
             additions = sum(
-                1 for l in diff_split
-                if l.startswith("+") and not l.startswith("+++")
+                1 for line in diff_split
+                if line.startswith("+") and not line.startswith("+++")
             )
             deletions = sum(
-                1 for l in diff_split
-                if l.startswith("-") and not l.startswith("---")
+                1 for line in diff_split
+                if line.startswith("-") and not line.startswith("---")
             )
-            from rich.panel import Panel
+            # Truncate very large diffs to avoid flooding the terminal
+            display_diff = diff_text
+            truncated = False
+            if len(diff_split) > 200:
+                display_diff = "\n".join(diff_split[:200])
+                truncated = True
             try:
+                title = (
+                    f"Overwrite {filepath} "
+                    f"[green]+{additions}[/green] "
+                    f"[red]-{deletions}[/red]"
+                )
+                if truncated:
+                    title += f" [dim](showing 200/{len(diff_split)} lines)[/dim]"
                 console.print(Panel(
-                    Syntax(diff_text, "diff", theme="monokai"),
-                    title=(
-                        f"Overwrite {filepath} "
-                        f"[green]+{additions}[/green] "
-                        f"[red]-{deletions}[/red]"
-                    ),
+                    Syntax(display_diff, "diff", theme="monokai"),
+                    title=title,
                     border_style="yellow",
                 ))
             except Exception:
                 console.print(f"\n[yellow]Overwrite file:[/yellow] {filepath}")
-                console.print(diff_text[:3000])
+                console.print(display_diff[:3000])
         else:
             console.print(f"\n[yellow]Overwrite file:[/yellow] {filepath}")
             console.print(
