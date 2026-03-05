@@ -23,18 +23,18 @@ console = Console()
 # ── Model Profiles ─────────────────────────────────────────────
 
 MODEL_PROFILES: dict[str, dict] = {
-    # ── Qwen Models ────────────────────────────────────────────
-    "qwen2.5-coder:14b": {
-        "strengths": ["code_generation", "code_review", "debugging", "refactoring"],
-        "speed": "medium",
-        "quality": "high",
-        "context": 32768,
-        "category": "code",
-    },
+    # ── Qwen 2.5 Coder ────────────────────────────────────────
     "qwen2.5-coder:7b": {
         "strengths": ["code_generation", "quick_questions"],
         "speed": "fast",
         "quality": "medium",
+        "context": 32768,
+        "category": "code",
+    },
+    "qwen2.5-coder:14b": {
+        "strengths": ["code_generation", "code_review", "debugging", "refactoring"],
+        "speed": "medium",
+        "quality": "high",
         "context": 32768,
         "category": "code",
     },
@@ -45,19 +45,122 @@ MODEL_PROFILES: dict[str, dict] = {
         "context": 32768,
         "category": "code",
     },
+
+    # ── Qwen3 Coder (MoE) ────────────────────────────────────
+    "qwen3-coder:latest": {
+        "strengths": ["code_generation", "architecture", "complex_code", "debugging"],
+        "speed": "fast",       # MoE — 3.3B active params
+        "quality": "very_high",
+        "context": 262144,
+        "category": "code",
+    },
+    "qwen3-coder:30b": {
+        "strengths": ["code_generation", "architecture", "complex_code", "debugging"],
+        "speed": "fast",       # MoE — 3.3B active params
+        "quality": "very_high",
+        "context": 262144,
+        "category": "code",
+    },
+    "qwen3-coder-next:latest": {
+        "strengths": ["code_generation", "architecture", "complex_code", "debugging", "refactoring"],
+        "speed": "fast",       # MoE — 3B active params
+        "quality": "very_high",
+        "context": 262144,
+        "category": "code",
+    },
+
+    # ── Qwen3 General ─────────────────────────────────────────
     "qwen3:8b": {
         "strengths": ["general", "writing", "reasoning", "explanation"],
         "speed": "fast",
         "quality": "medium",
-        "context": 32768,
+        "context": 40960,
         "category": "general",
     },
-    "qwen3-coder:latest": {
-        "strengths": ["code_generation", "architecture", "complex_code"],
+    "qwen3:14b": {
+        "strengths": ["general", "writing", "reasoning", "code_generation"],
+        "speed": "medium",
+        "quality": "high",
+        "context": 40960,
+        "category": "general",
+    },
+    "qwen3:30b": {
+        "strengths": ["general", "reasoning", "code_generation"],
+        "speed": "fast",       # MoE — 3B active params
+        "quality": "high",
+        "context": 262144,
+        "category": "general",
+    },
+    "qwen3:32b": {
+        "strengths": ["general", "writing", "reasoning", "code_generation", "architecture"],
         "speed": "slow",
         "quality": "very_high",
+        "context": 40960,
+        "category": "general",
+    },
+
+    # ── Qwen3.5 (Multimodal) ──────────────────────────────────
+    "qwen3.5:9b": {
+        "strengths": ["general", "writing", "reasoning", "explanation"],
+        "speed": "fast",
+        "quality": "high",
+        "context": 262144,
+        "category": "general",
+    },
+    "qwen3.5:4b": {
+        "strengths": ["general", "quick_questions"],
+        "speed": "very_fast",
+        "quality": "medium",
+        "context": 262144,
+        "category": "general",
+    },
+
+    # ── Devstral (Mistral, Agentic Coding) ────────────────────
+    "devstral:24b": {
+        "strengths": ["code_generation", "debugging", "code_review", "refactoring", "architecture"],
+        "speed": "medium",
+        "quality": "very_high",
+        "context": 131072,
+        "category": "code",
+    },
+    "devstral-small-2:latest": {
+        "strengths": ["code_generation", "debugging", "code_review", "refactoring"],
+        "speed": "medium",
+        "quality": "very_high",
+        "context": 131072,
+        "category": "code",
+    },
+
+    # ── Codestral (Mistral, Code Generation) ──────────────────
+    "codestral:22b": {
+        "strengths": ["code_generation", "code_review", "refactoring"],
+        "speed": "medium",
+        "quality": "high",
         "context": 32768,
         "category": "code",
+    },
+
+    # ── Gemma 3 (Google, Multimodal) ──────────────────────────
+    "gemma3:12b": {
+        "strengths": ["general", "writing", "reasoning", "explanation"],
+        "speed": "medium",
+        "quality": "high",
+        "context": 131072,
+        "category": "general",
+    },
+    "gemma3:27b": {
+        "strengths": ["general", "writing", "reasoning", "code_generation"],
+        "speed": "slow",
+        "quality": "very_high",
+        "context": 131072,
+        "category": "general",
+    },
+    "gemma3:4b": {
+        "strengths": ["general", "quick_questions"],
+        "speed": "very_fast",
+        "quality": "medium",
+        "context": 131072,
+        "category": "general",
     },
 
     # ── Llama Models ───────────────────────────────────────────
@@ -98,6 +201,43 @@ MODEL_PROFILES: dict[str, dict] = {
         "context": 16384,
         "category": "code",
     },
+    "deepseek-r1:7b": {
+        "strengths": ["reasoning", "general", "code_generation"],
+        "speed": "fast",
+        "quality": "medium",
+        "context": 32768,
+        "category": "general",
+    },
+    "deepseek-r1:14b": {
+        "strengths": ["reasoning", "general", "code_generation", "debugging"],
+        "speed": "medium",
+        "quality": "high",
+        "context": 32768,
+        "category": "general",
+    },
+    "deepseek-r1:32b": {
+        "strengths": ["reasoning", "general", "code_generation", "architecture"],
+        "speed": "slow",
+        "quality": "very_high",
+        "context": 32768,
+        "category": "general",
+    },
+
+    # ── StarCoder2 ─────────────────────────────────────────────
+    "starcoder2:7b": {
+        "strengths": ["code_generation", "quick_questions"],
+        "speed": "fast",
+        "quality": "medium",
+        "context": 16384,
+        "category": "code",
+    },
+    "starcoder2:15b": {
+        "strengths": ["code_generation", "code_review", "debugging"],
+        "speed": "medium",
+        "quality": "high",
+        "context": 16384,
+        "category": "code",
+    },
 
     # ── CodeLlama Models ───────────────────────────────────────
     "codellama:34b": {
@@ -122,7 +262,23 @@ MODEL_PROFILES: dict[str, dict] = {
         "category": "code",
     },
 
-    # ── Other Models ───────────────────────────────────────────
+    # ── Phi (Microsoft) ───────────────────────────────────────
+    "phi4:latest": {
+        "strengths": ["general", "reasoning", "code_generation"],
+        "speed": "medium",
+        "quality": "high",
+        "context": 16384,
+        "category": "general",
+    },
+    "phi4-mini:latest": {
+        "strengths": ["general", "quick_questions", "reasoning"],
+        "speed": "very_fast",
+        "quality": "medium",
+        "context": 131072,
+        "category": "general",
+    },
+
+    # ── Mistral ────────────────────────────────────────────────
     "mistral:latest": {
         "strengths": ["general", "writing", "reasoning"],
         "speed": "fast",
@@ -130,6 +286,8 @@ MODEL_PROFILES: dict[str, dict] = {
         "context": 8192,
         "category": "general",
     },
+
+    # ── Legacy / Small Models ─────────────────────────────────
     "phi3:latest": {
         "strengths": ["general", "quick_questions", "reasoning"],
         "speed": "very_fast",

@@ -17,12 +17,34 @@ from core.config import CONFIG_PATH, save_config
 VRAM_PER_BILLION_Q4 = 0.6  # GB per billion params (Q4 quantized)
 
 RECOMMENDED_MODELS: list[dict] = [
-    {"name": "qwen2.5-coder:7b",  "params": 7,  "tier": "low",    "note": "Good starter for coding"},
-    {"name": "qwen2.5-coder:14b", "params": 14, "tier": "medium", "note": "Best balance of speed and quality"},
-    {"name": "qwen2.5-coder:32b", "params": 32, "tier": "high",   "note": "Top quality, needs beefy GPU"},
+    # ── Coding: Qwen ──────────────────────────────────────────
+    {"name": "qwen2.5-coder:7b",       "params": 7,  "tier": "low",    "note": "Good starter for coding"},
+    {"name": "qwen2.5-coder:14b",      "params": 14, "tier": "medium", "note": "Best balance of speed and quality"},
+    {"name": "qwen2.5-coder:32b",      "params": 32, "tier": "high",   "note": "Top quality dense coder"},
+    {"name": "qwen3-coder:30b",        "params": 30, "active_params": 3.3, "tier": "medium", "note": "Agentic coding, MoE (3.3B active)"},
+    {"name": "qwen3-coder-next:latest", "params": 80, "active_params": 3, "tier": "high", "note": "Latest agentic coder, MoE (3B active)"},
+    # ── Coding: Mistral ───────────────────────────────────────
+    {"name": "devstral:24b",           "params": 24, "tier": "high",   "note": "SWE-bench leader, agentic coding"},
+    {"name": "codestral:22b",          "params": 22, "tier": "high",   "note": "80+ languages, code generation"},
+    # ── Coding: DeepSeek ──────────────────────────────────────
     {"name": "deepseek-coder-v2:latest", "params": 16, "tier": "medium", "note": "Strong at code review"},
-    {"name": "qwen3:8b",          "params": 8,  "tier": "low",    "note": "Good general-purpose"},
-    {"name": "llama3.1:latest",   "params": 8,  "tier": "low",    "note": "Meta's general model"},
+    # ── Coding: StarCoder ─────────────────────────────────────
+    {"name": "starcoder2:15b",         "params": 15, "tier": "medium", "note": "Transparent training, 16K context"},
+    {"name": "starcoder2:7b",          "params": 7,  "tier": "low",    "note": "Lightweight code completion"},
+    # ── Coding: Meta ──────────────────────────────────────────
+    {"name": "codellama:13b",          "params": 13, "tier": "medium", "note": "Meta code model, many languages"},
+    {"name": "codellama:7b",           "params": 7,  "tier": "low",    "note": "Fast code completion"},
+    # ── General / Reasoning ───────────────────────────────────
+    {"name": "qwen3:8b",              "params": 8,  "tier": "low",    "note": "Good general-purpose"},
+    {"name": "qwen3:14b",             "params": 14, "tier": "medium", "note": "Strong reasoning and coding"},
+    {"name": "qwen3:32b",             "params": 32, "tier": "high",   "note": "High-quality general model"},
+    {"name": "qwen3.5:9b",            "params": 9,  "tier": "low",    "note": "Multimodal, 256K context"},
+    {"name": "gemma3:12b",            "params": 12, "tier": "medium", "note": "Google multimodal, 128K context"},
+    {"name": "gemma3:27b",            "params": 27, "tier": "high",   "note": "Google multimodal, top quality"},
+    {"name": "llama3.1:latest",       "params": 8,  "tier": "low",    "note": "Meta's general model"},
+    {"name": "deepseek-r1:14b",       "params": 14, "tier": "medium", "note": "Reasoning model (distilled)"},
+    {"name": "phi4:latest",           "params": 14, "tier": "medium", "note": "Microsoft, strong reasoning"},
+    {"name": "mistral:latest",        "params": 7,  "tier": "low",    "note": "Fast general-purpose"},
 ]
 
 
@@ -223,11 +245,11 @@ def _recommend_models(
         if vram_est > vram_cap + 1.0:  # 1 GB tolerance
             continue
 
-        # Determine speed label
-        params = model["params"]
-        if params <= 8:
+        # Determine speed label (MoE models use active_params for speed)
+        speed_params = model.get("active_params", model["params"])
+        if speed_params <= 8:
             speed = "Fast"
-        elif params <= 16:
+        elif speed_params <= 16:
             speed = "Medium"
         else:
             speed = "Slow"

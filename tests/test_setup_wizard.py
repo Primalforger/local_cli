@@ -226,12 +226,31 @@ class TestRecommendModels:
         recs = _recommend_models(10.0, ["qwen2.5-coder:7b"])
         assert recs[0]["recommended"] is True
 
-    def test_speed_labels(self):
+    def test_speed_labels_dense_models(self):
         recs = _recommend_models(25.0, [])
         for r in recs:
+            # Only check dense models (no active_params)
+            if "active_params" in r:
+                continue
             if r["params"] <= 8:
-                assert r["speed"] == "Fast"
+                assert r["speed"] == "Fast", f"{r['name']} should be Fast"
             elif r["params"] <= 16:
-                assert r["speed"] == "Medium"
+                assert r["speed"] == "Medium", f"{r['name']} should be Medium"
             else:
-                assert r["speed"] == "Slow"
+                assert r["speed"] == "Slow", f"{r['name']} should be Slow"
+
+    def test_moe_models_use_active_params_for_speed(self):
+        """MoE models like qwen3-coder:30b (3.3B active) should be Fast."""
+        recs = _recommend_models(25.0, [])
+        for r in recs:
+            if r["name"] == "qwen3-coder:30b":
+                assert r["speed"] == "Fast"
+                break
+        else:
+            pytest.fail("qwen3-coder:30b not found in recommendations for 25GB budget")
+
+    def test_none_budget_excludes_large_moe(self):
+        """None budget (caps at ~8.4GB) should exclude 80B MoE models."""
+        recs = _recommend_models(None, [])
+        names = [r["name"] for r in recs]
+        assert "qwen3-coder-next:latest" not in names
