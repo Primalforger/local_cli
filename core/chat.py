@@ -542,6 +542,7 @@ class ChatSession:
         self._undo = None
         self._last_review = None
         self._last_suggestions = None
+        self._last_exploration = None
         self._pipeline = None
 
         self.budget = ContextBudget(

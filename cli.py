@@ -1017,6 +1017,29 @@ def cmd_review_focus(ctx: CommandContext):
     review_project(".", ctx.config, focus=ctx.arg)
 
 
+@command("/explore", aliases=["/investigate"], description="Deep autonomous exploration", category="Review")
+def cmd_explore(ctx: CommandContext):
+    from planning.explorer import explore_project
+
+    arg = ctx.arg.strip() if ctx.arg else ""
+    parts = arg.split(maxsplit=1)
+
+    valid_focuses = {"architecture", "security", "performance", "quality", "dependencies", "tests"}
+    focus = None
+    target = "."
+
+    if parts:
+        if parts[0].lower() in valid_focuses:
+            focus = parts[0].lower()
+            target = parts[1].strip() if len(parts) > 1 else "."
+        else:
+            target = parts[0]
+
+    result = explore_project(target, ctx.config, focus=focus)
+    if result:
+        ctx.session._last_exploration = result
+
+
 @command("/improve", description="Build improvements from last review", category="Review")
 def cmd_improve(ctx: CommandContext):
     """Apply improvements from review. Supports --severity and --category filters.
