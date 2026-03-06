@@ -10,7 +10,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from rich.console import Console
@@ -392,9 +392,10 @@ def _validate_plan(plan: dict) -> tuple[bool, list[str]]:
     plan.setdefault("description", "")
     plan.setdefault("tech_stack", [])
     plan.setdefault("directory_structure", [])
+    _steps = plan.get("steps", [])
     plan.setdefault("estimated_files", len(set(
-        f for s in plan.get("steps", [])
-        for f in s.get("files_to_create", [])
+        f for s in (_steps if isinstance(_steps, list) else [])
+        for f in (s.get("files_to_create", []) if isinstance(s, dict) else [])
     )))
     plan.setdefault("complexity", "medium")
 
