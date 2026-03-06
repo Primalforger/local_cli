@@ -456,6 +456,9 @@ def stream_response(messages: list[dict], config: dict) -> str:
     Delegates to the consolidated backend while preserving the original
     display behavior (streaming vs spinner) and metrics tracking.
     """
+    global _last_stream_interrupted
+    _last_stream_interrupted = False
+
     backend = OllamaBackend.from_config(config)
     tracker.start_request()
 
@@ -499,7 +502,6 @@ def stream_response(messages: list[dict], config: dict) -> str:
         if _status_ctx[0] is not None:
             _status_ctx[0].__exit__(None, None, None)
 
-    global _last_stream_interrupted
     _last_stream_interrupted = backend._was_interrupted
     if backend._was_interrupted:
         print()

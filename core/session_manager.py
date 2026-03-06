@@ -350,13 +350,18 @@ def cleanup_old_sessions(max_sessions: int = 100):
     sessions = sorted(SESSIONS_DIR.glob("*.json"))
     if len(sessions) > max_sessions:
         to_delete = sessions[: len(sessions) - max_sessions]
-        deleted_names = [p.name for p in to_delete]
+        deleted_names = []
         for path in to_delete:
-            path.unlink()
+            try:
+                path.unlink()
+                deleted_names.append(path.name)
+            except OSError:
+                pass
         try:
             _remove_from_index(deleted_names)
         except Exception:
             pass  # Best-effort
-        console.print(
-            f"[dim]Cleaned up {len(to_delete)} old sessions[/dim]"
-        )
+        if deleted_names:
+            console.print(
+                f"[dim]Cleaned up {len(deleted_names)} old sessions[/dim]"
+            )

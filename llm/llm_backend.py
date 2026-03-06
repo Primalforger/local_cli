@@ -172,12 +172,12 @@ class OllamaBackend:
         start_time = time.time()
 
         for retry in range(self._max_retries + 1):
-            if retry > 0:
-                backoff = min(2 ** retry, 16)
-                console.print(f"[dim]Waiting {backoff}s before retry...[/dim]")
-                time.sleep(backoff)
-
             try:
+                if retry > 0:
+                    backoff = min(2 ** retry, 16)
+                    console.print(f"[dim]Waiting {backoff}s before retry...[/dim]")
+                    time.sleep(backoff)
+
                 with httpx.stream(
                     "POST", url, json=payload, timeout=self._streaming_timeout
                 ) as resp:
@@ -194,6 +194,10 @@ class OllamaBackend:
                             if data.get("done"):
                                 break
                 break  # Success
+
+            except KeyboardInterrupt:
+                self._was_interrupted = True
+                break  # Exit retry loop, return partial full_response
 
             except httpx.ConnectError:
                 if retry < self._max_retries:
@@ -268,10 +272,6 @@ class OllamaBackend:
             except Exception as e:
                 console.print(f"\n[red]Error: {e}[/red]")
                 return ""
-
-            except KeyboardInterrupt:
-                self._was_interrupted = True
-                break  # Exit retry loop, return partial full_response
 
         self._last_duration = time.time() - start_time
         return full_response

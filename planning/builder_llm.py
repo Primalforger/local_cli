@@ -11,7 +11,7 @@ from utils.error_diagnosis import diagnose_test_error, format_error_guidance
 from planning.builder_prompts import STEP_SYSTEM_PROMPT_WITH_EDITS, FIX_SYSTEM_PROMPT, TDD_TEST_SYSTEM_PROMPT
 from planning.builder_files import process_response_files, normalize_path
 from planning.builder_deps import _is_missing_dependency_error, _try_reinstall_deps, run_cmd
-from planning.builder_models import FixAttempt, FileSnapshot
+from planning.builder_models import FixAttempt
 from planning.builder_progress import _load_existing_files
 
 try:
