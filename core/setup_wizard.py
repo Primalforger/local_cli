@@ -121,7 +121,10 @@ def run_setup_wizard(config: dict, console: Console | None = None) -> dict:
     )
 
     # Build recommendations
-    recommendations = _recommend_models(vram_budget, installed_names)
+    recommendations = _recommend_models(
+        vram_budget, installed_names,
+        installed_models=system_info["installed_models"],
+    )
 
     if not recommendations:
         console.print("[yellow]No recommended models match your VRAM budget.[/yellow]")
@@ -371,8 +374,49 @@ def _quant_model_tag(model_name: str, quant: str) -> str:
     return f"{model_name}-{quant.lower()}"
 
 
+def _append_installed_extras(
+    results: list[dict], installed_models: list[dict], existing_names: set[str],
+) -> None:
+    """Append installed models not in RECOMMENDED_MODELS to the results list."""
+    for m in installed_models:
+        name = m["name"]
+        if name in existing_names:
+            continue
+
+        size_gb = m.get("size", 0) / (1024 ** 3)
+        params = _extract_param_count(name)
+
+        # Infer params from file size if name doesn't contain a param count
+        if params is None:
+            # Rough: Q4 model file ≈ params * 0.56 GB
+            params = round(size_gb / 0.56, 1) if size_gb > 0 else 7.0
+
+        if params <= 8:
+            speed = "Fast"
+        elif params <= 16:
+            speed = "Medium"
+        else:
+            speed = "Slow"
+
+        results.append({
+            "name": name,
+            "params": params,
+            "tier": "custom",
+            "note": "Installed (custom/pulled)",
+            "quants": ["Q4_K_M"],
+            "max_ctx": 32768,
+            "installed": True,
+            "recommended": False,
+            "vram_est": size_gb or params * 0.56 + 0.5,
+            "speed": speed,
+            "quant": "Q4_K_M",
+            "quant_tag": name,  # Use as-is — already installed
+        })
+
+
 def _recommend_models(
-    vram_budget: float | None, installed_names: list[str]
+    vram_budget: float | None, installed_names: list[str],
+    installed_models: list[dict] | None = None,
 ) -> list[dict]:
     """Filter and sort RECOMMENDED_MODELS for the user's system.
 
@@ -425,6 +469,12 @@ def _recommend_models(
             "quant": quant,
             "quant_tag": _quant_model_tag(model["name"], quant),
         })
+
+    # Append any installed models not in RECOMMENDED_MODELS
+    if installed_models:
+        existing = {r["name"] for r in results}
+        existing.update(m["name"] for m in RECOMMENDED_MODELS)  # Include filtered-out ones
+        _append_installed_extras(results, installed_models, existing)
 
     # Mark the best candidate as recommended:
     # Prefer installed models, then largest that fits

@@ -528,6 +528,17 @@ class ChatSession:
         self._backend = OllamaBackend.from_config(config)
         self._current_plan = None
         self._router = None
+        route_mode = config.get("route_mode", "manual")
+        if route_mode != "manual":
+            try:
+                from llm.model_router import ModelRouter
+                self._router = ModelRouter(
+                    config.get("ollama_url", "http://localhost:11434"),
+                    config.get("model", "qwen2.5-coder:14b"),
+                )
+                self._router.mode = route_mode
+            except Exception:
+                pass
         self._undo = None
         self._last_review = None
         self._last_suggestions = None
@@ -1003,7 +1014,11 @@ class ChatSession:
         iteration = 0
 
         for iteration in range(self.max_tool_iterations):
-            console.print("\n[bold blue]Assistant:[/bold blue]")
+            if self._router and self._router.mode != "manual":
+                model_name = self.config.get("model", "")
+                console.print(f"\n[bold blue]Assistant[/bold blue] [dim]({model_name})[/dim][bold blue]:[/bold blue]")
+            else:
+                console.print("\n[bold blue]Assistant:[/bold blue]")
             response = stream_response(self.messages, self.config)
 
             if _last_stream_interrupted and response:
