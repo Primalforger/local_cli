@@ -287,6 +287,9 @@ def _load_custom_prompts() -> dict[str, dict[str, str]]:
             continue
 
         try:
+            # Skip files larger than 50KB to prevent memory bloat
+            if filepath.stat().st_size > 50_000:
+                continue
             content = filepath.read_text(encoding="utf-8").strip()
             if not content:
                 continue

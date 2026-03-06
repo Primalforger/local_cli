@@ -535,14 +535,24 @@ def _infer_profile_from_name(model_name: str) -> dict:
 
 # ── Model Discovery ────────────────────────────────────────────
 
+_model_cache: dict[str, tuple[float, list[str]]] = {}  # url -> (timestamp, models)
+_MODEL_CACHE_TTL = 60.0  # seconds
+
+
 def get_available_models(ollama_url: str) -> list[str]:
-    """Get list of models available in Ollama.
+    """Get list of models available in Ollama (cached for 60s).
 
     Returns:
         List of model names, empty list on failure
     """
     if not ollama_url:
         return []
+
+    import time
+    now = time.time()
+    cached = _model_cache.get(ollama_url)
+    if cached and (now - cached[0]) < _MODEL_CACHE_TTL:
+        return cached[1]
 
     try:
         resp = httpx.get(
@@ -551,7 +561,9 @@ def get_available_models(ollama_url: str) -> list[str]:
         )
         resp.raise_for_status()
         models = resp.json().get("models", [])
-        return [m.get("name", "") for m in models if m.get("name")]
+        result = [m.get("name", "") for m in models if m.get("name")]
+        _model_cache[ollama_url] = (now, result)
+        return result
     except httpx.ConnectError:
         return []
     except httpx.TimeoutException:
@@ -672,8 +684,13 @@ def ensure_model_available(
                 )
                 return avail
 
-    # 4. First available
-    fallback = available[0]
+    # 4. First available — prefer code/chat models over embedding models
+    _embedding_patterns = ("embed", "nomic", "all-minilm", "bge-")
+    chat_models = [
+        m for m in available
+        if not any(p in m.lower() for p in _embedding_patterns)
+    ]
+    fallback = chat_models[0] if chat_models else available[0]
     console.print(
         f"[yellow]Model '{model}' not available, "
         f"falling back to '{fallback}'[/yellow]"

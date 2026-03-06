@@ -32,7 +32,7 @@ def tool_read_file(args: str) -> str:
                 f"Use read_file_lines, grep, or search_text to find specific content."
             )
 
-        for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+        for encoding in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
             try:
                 content = path.read_text(encoding=encoding)
                 lines = content.split("\n")
@@ -58,6 +58,18 @@ def tool_read_file(args: str) -> str:
                 )
             except UnicodeDecodeError:
                 continue
+
+        # Last resort: read with replacement characters
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            lines = content.split("\n")
+            return _scan_output(
+                f"File: {filepath} ({len(lines)} lines, {size:,} bytes) "
+                f"[decoded with replacements]\n"
+                f"```\n{content}\n```"
+            )
+        except Exception:
+            pass
 
         return f"Error: Cannot read {filepath} — binary file"
     except Exception as e:
@@ -193,7 +205,11 @@ def tool_write_file(args: str) -> str:
 
     if _confirm(f"Proceed? (y/n): "):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        try:
+            from utils.file_utils import atomic_write
+            atomic_write(path, content)
+        except ImportError:
+            path.write_text(content, encoding="utf-8")
         return f"Successfully wrote {filepath} ({line_count} lines, {byte_count:,} bytes)"
     return "Write cancelled."
 
@@ -398,6 +414,15 @@ def tool_edit_file(args: str) -> str:
         )
         if _confirm(f"Apply? (y/n): "):
             path.write_text(content, encoding="utf-8")
+            # Post-edit syntax check for Python files
+            if path.suffix == ".py":
+                try:
+                    import py_compile
+                    py_compile.compile(str(path), doraise=True)
+                except py_compile.PyCompileError as e:
+                    console.print(f"[yellow]⚠ Syntax warning after edit: {e}[/yellow]")
+                except Exception:
+                    pass
             return f"Successfully edited {filepath} ({changes} change(s))"
         return "Edit cancelled."
 

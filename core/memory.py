@@ -153,17 +153,16 @@ def _add_entry(
 
     entries = memory.get(key, [])
 
-    # Check for duplicate (same description/content in last 5 entries)
+    # Check for duplicate across all entries in category
     content_field = "description" if "description" in entry else "content"
     new_text = entry.get(content_field, "").strip().lower()
 
     if new_text:
-        recent = entries[-5:] if len(entries) >= 5 else entries
-        for existing in recent:
+        for existing in entries:
             existing_text = existing.get(content_field, "").strip().lower()
             if existing_text == new_text:
                 console.print(
-                    "[yellow]⚠ Duplicate entry — already recorded recently.[/yellow]"
+                    "[yellow]⚠ Duplicate entry — already recorded.[/yellow]"
                 )
                 return False
 
@@ -378,8 +377,10 @@ def score_memory_entry(entry_text: str, query: str) -> float:
         weight = len(token) / 5.0
         score += weight
 
-    # Normalize by entry length to avoid biasing toward longer entries
-    score = score / (len(entry_tokens) ** 0.5) if entry_tokens else 0.0
+    # Normalize by log of entry length — gentler than sqrt, avoids
+    # penalizing detailed entries while still preventing length-only wins
+    import math
+    score = score / math.log2(len(entry_tokens) + 1) if entry_tokens else 0.0
 
     return round(score, 4)
 

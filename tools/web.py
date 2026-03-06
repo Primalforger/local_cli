@@ -8,7 +8,7 @@ import signal
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from tools.common import console, _sanitize_tool_args, _confirm_command, _scan_output
+from tools.common import console, _sanitize_tool_args, _confirm_command, _scan_output, get_tool_config
 from tools.shell import _background_servers
 
 import socket
@@ -26,7 +26,9 @@ def tool_fetch_url(args: str) -> str:
 
     try:
         import httpx
-        resp = httpx.get(url, timeout=15, follow_redirects=True)
+        _config = get_tool_config()
+        _fetch_timeout = _config.get("tool_fetch_timeout", 15)
+        resp = httpx.get(url, timeout=_fetch_timeout, follow_redirects=True)
         content_type = resp.headers.get("content-type", "")
 
         if "json" in content_type:
@@ -480,6 +482,13 @@ def _web_search_raw(query: str, max_results: int = 5) -> list[dict]:
             html, re.DOTALL,
         )
 
+        if not title_url_matches and html and len(html) > 500:
+            # HTML was returned but our regex didn't match — markup likely changed
+            console.print(
+                "[dim]⚠ Web search: HTML structure may have changed, "
+                "results could be incomplete[/dim]"
+            )
+
         for i, (raw_url, raw_title) in enumerate(title_url_matches):
             if len(results) >= max_results:
                 break
@@ -509,7 +518,8 @@ def _web_search_raw(query: str, max_results: int = 5) -> list[dict]:
                     "url": url,
                     "snippet": snippet,
                 })
-    except Exception:
+    except Exception as e:
+        console.print(f"[dim]⚠ Web search parse error: {e}[/dim]")
         return []
 
     return results

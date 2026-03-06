@@ -421,6 +421,17 @@ def read_error_context(
         if not p.is_file():
             continue
 
+        # Prevent symlink traversal — block if path is a symlink
+        # pointing outside project directory
+        try:
+            if p.is_symlink():
+                resolved = p.resolve()
+                cwd = Path.cwd().resolve()
+                if cwd not in resolved.parents and resolved != cwd:
+                    continue
+        except (OSError, ValueError):
+            continue
+
         try:
             size = p.stat().st_size
             if size > max_file_size:

@@ -424,28 +424,20 @@ def check_file_imports(filepath: str, base_dir: str | None = None) -> list[dict]
 
 # ── Read-Only Tool Detection ──────────────────────────────────
 
-READ_ONLY_TOOLS = frozenset({
-    "read_file", "list_files", "list_tree",
-    "find_files", "search_text", "grep",
-    "file_info", "count_lines", "check_syntax",
-    "check_port", "env_info", "fetch_url",
-    "check_url", "list_deps", "git",
-})
-
-READ_ONLY_GIT = frozenset({
-    "status", "log", "diff", "tag",
-    "show", "remote", "stash list",
-})
-
-
 def _is_tool_read_only(tool_name: str, tool_args: str = "") -> bool:
-    """Check if a tool call is read-only (no side effects)."""
-    if tool_name == "git":
-        return any(
-            tool_args.strip().startswith(cmd)
-            for cmd in READ_ONLY_GIT
-        )
-    return tool_name in READ_ONLY_TOOLS
+    """Check if a tool call is read-only (no side effects).
+
+    Delegates to tools.common.is_tool_read_only (single source of truth).
+    """
+    try:
+        from tools.common import is_tool_read_only
+        return is_tool_read_only(tool_name, tool_args)
+    except ImportError:
+        # Minimal fallback if tools.common unavailable
+        return tool_name in {
+            "read_file", "list_files", "list_tree", "search_text",
+            "grep", "file_info", "count_lines", "check_syntax",
+        }
 
 
 # ── Stream Response ────────────────────────────────────────────
@@ -537,8 +529,11 @@ class ChatSession:
                     config.get("model", "qwen2.5-coder:14b"),
                 )
                 self._router.mode = route_mode
-            except Exception:
-                pass
+            except Exception as e:
+                console.print(
+                    f"[yellow]⚠ Model router init failed: {e} "
+                    f"— using manual routing[/yellow]"
+                )
         self._undo = None
         self._last_review = None
         self._last_suggestions = None
@@ -598,8 +593,8 @@ class ChatSession:
             memory_context = get_memory_context()
             if memory_context:
                 memory_context = f"\n\nProject Memory:\n{memory_context}"
-        except Exception:
-            console.print("[yellow]⚠ Could not load project memory[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]⚠ Could not load project memory: {e}[/yellow]")
 
         self.messages = [
             {
@@ -1011,6 +1006,7 @@ class ChatSession:
         # Tool loop
         last_tool_calls = ""
         repeated_count = 0
+        _recent_call_window: list[str] = []  # sliding window for pattern detection
         response = ""
         iteration = 0
 
@@ -1048,7 +1044,7 @@ class ChatSession:
             if not tool_calls:
                 break
 
-            # Loop protection — detect repeated calls
+            # Loop protection — detect repeated and alternating calls
             current_calls = str(tool_calls)
             if current_calls == last_tool_calls:
                 repeated_count += 1
@@ -1061,6 +1057,17 @@ class ChatSession:
             else:
                 repeated_count = 0
             last_tool_calls = current_calls
+
+            # Detect alternating patterns (A→B→A→B) via sliding window
+            _recent_call_window.append(current_calls)
+            if len(_recent_call_window) >= 4:
+                w = _recent_call_window[-4:]
+                if w[0] == w[2] and w[1] == w[3] and w[0] != w[1]:
+                    console.print(
+                        "\n[yellow]⚠ Model stuck in alternating tool loop. "
+                        "Stopping.[/yellow]"
+                    )
+                    break
 
             # Execute tools
             result_text, has_read_only, has_write = (
@@ -1198,8 +1205,8 @@ class ChatSession:
                     quality_issues=_quality_issues,
                     auto_corrected=_was_corrected,
                 )
-            except Exception:
-                pass  # Best effort — never block chat
+            except Exception as e:
+                console.print(f"[dim]⚠ Outcome tracking skipped: {e}[/dim]")
 
         self._interaction_count += 1
         self._maybe_train_validator()
@@ -1216,8 +1223,8 @@ class ChatSession:
             data = self._outcome_tracker.get_training_data()
             if data:
                 self._response_validator.train(data)
-        except Exception:
-            pass  # Best effort
+        except Exception as e:
+            console.print(f"[dim]⚠ Validator training skipped: {e}[/dim]")
 
     def _show_context_usage(self):
         """Show context bar if usage is getting high."""

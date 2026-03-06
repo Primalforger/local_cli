@@ -131,8 +131,12 @@ def _emit_learning_signal(
             outcome="success" if success else "failure",
             prompt_preview=prompt[:200],
         )
-    except Exception:
-        pass  # Never block build
+    except Exception as e:
+        try:
+            from rich.console import Console
+            Console(stderr=True).print(f"[dim]⚠ Outcome tracking skipped: {e}[/dim]")
+        except Exception:
+            pass  # Last resort — never block build
 
 
 # ── Main Build Loop ───────────────────────────────────────────
@@ -653,16 +657,23 @@ def build_plan(
     # ── Post-build cleanup (format + lint) ────────────
     _post_build_cleanup(base_dir, project_info, config)
 
-    # ── Clean up progress files ────────────────────────
+    # ── Clean up progress files (atomic — rename before delete) ──
     for cleanup_path in (
         base_dir / ".build_progress.json",
         Path.cwd() / ".build_progress.json",
     ):
         try:
             if cleanup_path.exists():
-                cleanup_path.unlink()
+                # Rename first so partial delete doesn't leave corrupt file
+                tmp = cleanup_path.with_suffix(".json.removing")
+                cleanup_path.rename(tmp)
+                tmp.unlink()
         except Exception:
-            pass
+            # Last resort — try direct delete
+            try:
+                cleanup_path.unlink(missing_ok=True)
+            except Exception:
+                pass
     # Disable auto-confirm after build
     try:
         from tools import set_auto_confirm

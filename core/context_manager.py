@@ -53,14 +53,44 @@ def _ollama_tokenize(text: str, model: str, ollama_url: str) -> int | None:
 
 
 def _heuristic_tokens(text: str) -> int:
-    """Heuristic token estimation based on character classes."""
+    """Heuristic token estimation based on character classes.
+
+    Uses multiple signals: word count, code density, CamelCase splitting,
+    non-ASCII character penalty.
+    """
     if not text:
         return 0
-    words = len(text.split())
-    code_indicators = text.count("{") + text.count("}") + text.count("(") + text.count(")")
-    if code_indicators > words * 0.1:
-        return int(words * 1.5)
-    return int(words * 1.3)
+
+    import re
+    words = text.split()
+    word_count = len(words)
+
+    if word_count == 0:
+        # Pure whitespace/newlines — still costs tokens
+        return max(1, len(text) // 4)
+
+    # Count CamelCase/snake_case splits (each sub-word is typically a token)
+    camel_splits = sum(
+        len(re.findall(r'[A-Z][a-z]|_[a-z]', w)) for w in words
+    )
+
+    # Count non-ASCII characters (often 2-3 tokens each)
+    non_ascii = sum(1 for c in text if ord(c) > 127)
+
+    # Code density signals
+    code_chars = sum(text.count(c) for c in "{}()[];:=<>!&|+-*/")
+    code_density = code_chars / max(len(text), 1)
+
+    # Base multiplier depends on code density
+    if code_density > 0.05:
+        multiplier = 1.6   # Heavy code
+    elif code_density > 0.02:
+        multiplier = 1.45  # Mixed code/prose
+    else:
+        multiplier = 1.3   # Mostly prose
+
+    tokens = int(word_count * multiplier) + camel_splits + (non_ascii * 2)
+    return max(1, tokens)
 
 
 def estimate_tokens(
@@ -372,9 +402,13 @@ def smart_compact(
 
     compacted = [system, summary_message] + keep_recent
 
-    # Show stats
+    # Guard: compaction must actually reduce token count
     old_tokens = estimate_message_tokens(messages)
     new_tokens = estimate_message_tokens(compacted)
+    if new_tokens >= old_tokens:
+        console.print("[yellow]⚠ Compaction would not reduce context — skipping.[/yellow]")
+        return messages
+
     saved = old_tokens - new_tokens
     console.print(
         f"[dim]  Compacted: {old_tokens:,} → {new_tokens:,} tokens "

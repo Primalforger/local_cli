@@ -71,6 +71,10 @@ DEFAULT_CONFIG = {
 
     # Planning settings
     "plan_web_research": True,                # Web research before plan generation
+
+    # Tool timeout settings (seconds)
+    "tool_command_timeout": 120,              # Shell command timeout
+    "tool_fetch_timeout": 15,                # URL fetch timeout
 }
 
 # ── Config value validation ────────────────────────────────────
@@ -107,6 +111,8 @@ _CONFIG_VALIDATORS = {
     "quality_auto_retry": lambda v: isinstance(v, bool),
     "quality_min_score": lambda v: isinstance(v, (int, float)) and 0.0 <= v <= 1.0,
     "plan_web_research": lambda v: isinstance(v, bool),
+    "tool_command_timeout": lambda v: isinstance(v, int) and 10 <= v <= 600,
+    "tool_fetch_timeout": lambda v: isinstance(v, int) and 5 <= v <= 120,
 }
 
 # Config values that should be parsed as booleans
@@ -124,6 +130,7 @@ _INT_KEYS = {
     "num_ctx", "max_tokens", "max_fix_attempts",
     "streaming_timeout", "max_retries", "undo_max_history", "preview_max_bytes",
     "adaptive_routing_min_samples",
+    "tool_command_timeout", "tool_fetch_timeout",
 }
 
 # Config values that should be parsed as floats
@@ -413,6 +420,13 @@ def load_config() -> dict:
     # Cross-field validation
     _validate_cross_fields(config)
 
+    # Restore display settings if saved
+    try:
+        from core.display import load_display_config
+        load_display_config(config)
+    except ImportError:
+        pass
+
     return config
 
 
@@ -475,6 +489,13 @@ def _apply_env_overrides(config: dict):
 def save_config(config: dict):
     """Save config to disk (only values that differ from defaults)."""
     ensure_dirs()
+
+    # Merge current display settings into config before saving
+    try:
+        from core.display import get_display_config
+        config.update(get_display_config())
+    except ImportError:
+        pass
 
     # Only save non-default values to keep config file clean
     to_save = {}

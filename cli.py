@@ -5,6 +5,7 @@ import sys
 import os
 import re
 import json
+import atexit
 import argparse
 from pathlib import Path
 
@@ -130,20 +131,16 @@ def cmd_config(ctx: CommandContext):
         kv = ctx.arg.split(maxsplit=1)
         if len(kv) == 2:
             key, value = kv
-            try:
-                value = int(value)
-            except ValueError:
-                try:
-                    value = float(value)
-                except ValueError:
-                    if value.lower() in ("true", "yes", "on"):
-                        value = True
-                    elif value.lower() in ("false", "no", "off"):
-                        value = False
-            ctx.config[key] = value
-            ctx.session.config[key] = value
+            from core.config import parse_config_value, validate_config_value
+            parsed = parse_config_value(key, value)
+            is_valid, error = validate_config_value(key, parsed)
+            if not is_valid:
+                ctx.console.print(f"[red]{error}[/red]")
+                return
+            ctx.config[key] = parsed
+            ctx.session.config[key] = parsed
             set_tool_config(ctx.config)
-            ctx.console.print(f"[green]{key} = {value}[/green]")
+            ctx.console.print(f"[green]{key} = {parsed}[/green]")
         else:
             ctx.console.print("[yellow]Usage: /config <key> <value>[/yellow]")
     else:
@@ -1956,6 +1953,13 @@ def main():
 
     config = load_config()
     set_tool_config(config)
+
+    # Register cleanup for background processes on exit
+    try:
+        from tools.shell import cleanup_all_background
+        atexit.register(cleanup_all_background)
+    except ImportError:
+        pass
 
     # First-run setup wizard (interactive mode only)
     if not args.model and not args.prompt and sys.stdin.isatty():

@@ -60,6 +60,44 @@ _background_servers: dict[int, dict] = {}  # port -> {process, command, started}
 _background_processes: dict[int, dict] = {}  # pid -> {process, command, started}
 
 
+def cleanup_all_background() -> None:
+    """Terminate all tracked background processes and close file handles.
+
+    Intended to be called on CLI exit (via atexit or shutdown hook).
+    """
+    for pid, info in list(_background_processes.items()):
+        try:
+            proc = info["process"]
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except OSError:
+            pass
+        log_fh = info.get("log_fh")
+        if log_fh and not log_fh.closed:
+            try:
+                log_fh.close()
+            except OSError:
+                pass
+    _background_processes.clear()
+
+    for port, info in list(_background_servers.items()):
+        try:
+            proc = info["process"]
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except OSError:
+            pass
+    _background_servers.clear()
+
+
 def _reap_completed() -> None:
     """Close file handles and remove entries for completed background processes."""
     finished = [
@@ -91,10 +129,12 @@ def tool_run_command(args: str) -> str:
         return "Command cancelled."
 
     try:
+        _config = get_tool_config()
+        _cmd_timeout = _config.get("tool_command_timeout", 120)
         # shell=True: user commands may contain pipes, redirects, shell expansions
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,
-            timeout=120, cwd=os.getcwd(),
+            timeout=_cmd_timeout, cwd=os.getcwd(),
         )
         output = ""
         if result.stdout:
@@ -106,7 +146,7 @@ def tool_run_command(args: str) -> str:
         output += f"Exit code: {result.returncode}"
         return _scan_output(output) if output else "Command completed (no output)."
     except subprocess.TimeoutExpired:
-        return "Error: Command timed out after 120 seconds."
+        return f"Error: Command timed out after {_cmd_timeout} seconds."
     except (subprocess.SubprocessError, OSError) as e:
         return f"Error: {e}"
 

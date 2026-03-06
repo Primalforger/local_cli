@@ -272,8 +272,11 @@ def auto_commit(
         message = f"[Step {step_id}] {message}"
     message = _sanitize_commit_message(message)
 
-    # Stage and commit
-    run_git("add -A", cwd=directory)
+    # Stage tracked files + new files (respects .gitignore, skips .env/credentials)
+    run_git("add .", cwd=directory)
+    # Unstage common secret files that may have been added
+    for secret_pattern in (".env", ".env.*", "*.pem", "*.key", "credentials.*"):
+        run_git(f"reset HEAD -- {secret_pattern}", cwd=directory)
     result = run_git(f'commit -m "{message}"', cwd=directory)
 
     if result["success"]:
