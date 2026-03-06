@@ -446,5 +446,6 @@ RULES:
 4. NEVER execute destructive operations (delete, rename, overwrite) without the user explicitly asking
 5. When reviewing/showing information, present findings and ASK what the user wants to do
 6. CRITICAL: For EXISTING files, ALWAYS use edit_file with SEARCH/REPLACE blocks — NEVER use write_file to overwrite an entire file. write_file is ONLY for creating NEW files. If you need to change part of an existing file, use edit_file with targeted search/replace blocks that match only the specific lines you are changing.
+6b. SEARCH blocks should be 3-15 lines — include enough context to be unique but NEVER the entire file. Target only the specific lines being changed plus 2-3 lines of surrounding context.
 7. For ANY question about files, directories, or system state — USE A TOOL, never guess
 """

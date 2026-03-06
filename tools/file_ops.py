@@ -104,6 +104,12 @@ def tool_read_file_lines(args: str) -> str:
         return f"Error reading {filepath}: {e}"
 
 
+_EDIT_MARKER_RE = re.compile(
+    r'<{6,8}\s*SEARCH[ \t]*\n.*?\n={6,8}[ \t]*\n.*?\n>{6,8}\s*REPLACE',
+    re.DOTALL,
+)
+
+
 def tool_write_file(args: str) -> str:
     """Write content to a file (create or overwrite)."""
     lines = args.split("\n", 1)
@@ -114,6 +120,14 @@ def tool_write_file(args: str) -> str:
     path, error = _validate_path(filepath, must_exist=False)
     if error:
         return error
+
+    # Intercept SEARCH/REPLACE markers — redirect to edit_file for existing files
+    if path.exists() and _EDIT_MARKER_RE.search(content):
+        console.print(
+            f"[yellow]Detected SEARCH/REPLACE markers in write_file — "
+            f"redirecting to edit_file[/yellow]"
+        )
+        return tool_edit_file(args)
 
     line_count = len(content.split("\n"))
     byte_count = len(content.encode("utf-8"))
@@ -222,7 +236,9 @@ def tool_edit_file(args: str) -> str:
     except Exception as e:
         return f"Error reading {filepath}: {e}"
 
-    sr_pattern = r'<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE'
+    # Normalize \r\n → \n and strip trailing whitespace on marker lines
+    block = block.replace("\r\n", "\n")
+    sr_pattern = r'<{6,8}\s*SEARCH[ \t]*\n(.*?)\n={6,8}[ \t]*\n(.*?)\n>{6,8}\s*REPLACE'
     matches = re.findall(sr_pattern, block, re.DOTALL)
 
     if not matches:
@@ -240,6 +256,16 @@ def tool_edit_file(args: str) -> str:
             search_clean = _clean_fences(search_clean).rstrip("\n")
         if replace_clean.startswith("```") and replace_clean.endswith("```"):
             replace_clean = _clean_fences(replace_clean).rstrip("\n")
+
+        # Whole-file guard — reject SEARCH blocks that cover most of the file
+        search_line_count = search_clean.count("\n") + 1
+        file_line_count = content.count("\n") + 1
+        if file_line_count > 5 and search_line_count / file_line_count > 0.8:
+            failed_searches.append(
+                f"(SEARCH block is {search_line_count}/{file_line_count} lines "
+                f"— too large. Use targeted blocks of 5-15 lines around the change.)"
+            )
+            continue
 
         # Exact match
         if search_clean in content:
@@ -265,6 +291,58 @@ def tool_edit_file(args: str) -> str:
             changes += 1
             continue
 
+        # Indentation-normalized match
+        search_dedented = "\n".join(line.lstrip() for line in search_clean.split("\n"))
+        content_dedented_lines = [line.lstrip() for line in content_lines]
+        content_dedented = "\n".join(content_dedented_lines)
+
+        if search_dedented in content_dedented:
+            idx = content_dedented.index(search_dedented)
+            start_line = content_dedented[:idx].count("\n")
+            match_count = search_dedented.count("\n") + 1
+            content_lines = content.split("\n")
+
+            # Re-indent replacement to match the original file's indentation
+            search_first = search_clean.split("\n")[0]
+            original_first = content_lines[start_line]
+            search_indent = len(search_first) - len(search_first.lstrip())
+            original_indent = len(original_first) - len(original_first.lstrip())
+            indent_diff = original_indent - search_indent
+
+            replace_lines = replace_clean.split("\n")
+            if indent_diff > 0:
+                pad = " " * indent_diff
+                replace_lines = [pad + line if line.strip() else line for line in replace_lines]
+            elif indent_diff < 0:
+                trim = abs(indent_diff)
+                replace_lines = [
+                    line[trim:] if len(line) - len(line.lstrip()) >= trim else line
+                    for line in replace_lines
+                ]
+
+            content_lines[start_line:start_line + match_count] = replace_lines
+            content = "\n".join(content_lines)
+            changes += 1
+            console.print(f"[yellow]Matched with adjusted indentation in {filepath}[/yellow]")
+            continue
+
+        # Line-number prefix stripping
+        stripped_search_lines = []
+        has_line_nums = False
+        for line in search_clean.split("\n"):
+            cleaned = re.sub(r'^\s*\d{2,}\s*[|:]\s?', '', line)
+            if cleaned != line:
+                has_line_nums = True
+            stripped_search_lines.append(cleaned)
+
+        if has_line_nums:
+            search_no_nums = "\n".join(stripped_search_lines)
+            if search_no_nums in content:
+                content = content.replace(search_no_nums, replace_clean, 1)
+                changes += 1
+                console.print(f"[yellow]Matched after stripping line numbers in {filepath}[/yellow]")
+                continue
+
         # Fuzzy match
         best_match = _fuzzy_find_block(search_clean, content)
         if best_match:
@@ -276,7 +354,9 @@ def tool_edit_file(args: str) -> str:
             )
             continue
 
-        failed_searches.append(search_clean[:200])
+        closest = _find_closest_lines(search_clean, content)
+        hint = f"\n{closest}" if closest else ""
+        failed_searches.append(f"{search_clean[:200]}{hint}")
 
     if failed_searches:
         error_msg = f"Error: Could not find {len(failed_searches)} search block(s) in {filepath}:\n"
@@ -287,6 +367,21 @@ def tool_edit_file(args: str) -> str:
         return error_msg
 
     if changes > 0:
+        # Strip any residual SEARCH/REPLACE markers from content
+        sr_marker_re = re.compile(r'^(?:<{6,8}\s*SEARCH|>{6,8}\s*REPLACE)\s*$')
+        equals_re = re.compile(r'^={7}\s*$')
+        content_split = content.split("\n")
+        has_sr_markers = any(sr_marker_re.match(line) for line in content_split)
+        if has_sr_markers:
+            clean_lines = [
+                line for line in content_split
+                if not sr_marker_re.match(line) and not equals_re.match(line)
+            ]
+            content = "\n".join(clean_lines)
+            console.print(
+                f"[yellow]Stripped residual SEARCH/REPLACE markers from {filepath}[/yellow]"
+            )
+
         console.print(
             f"\n[yellow]Edit file:[/yellow] {filepath} ({changes} change(s))"
         )
@@ -334,13 +429,38 @@ def tool_patch_file(args: str) -> str:
         return f"Error applying patch: {e}"
 
 
+def _find_closest_lines(search: str, content: str, n: int = 2) -> str:
+    """Find the closest matching lines in content for a failed search."""
+    search_lines = [l.strip() for l in search.strip().split("\n") if l.strip()][:3]
+    content_lines = content.split("\n")
+    if not search_lines:
+        return ""
+
+    best_score = 0.0
+    best_idx = 0
+    for i, cline in enumerate(content_lines):
+        for sline in search_lines:
+            ratio = difflib.SequenceMatcher(None, sline.strip(), cline.strip()).ratio()
+            if ratio > best_score:
+                best_score = ratio
+                best_idx = i
+
+    if best_score < 0.5:
+        return ""
+
+    start = max(0, best_idx - 1)
+    end = min(len(content_lines), best_idx + n + 1)
+    region = "\n".join(f"  {i+1}: {content_lines[i]}" for i in range(start, end))
+    return f"(closest match near line {best_idx + 1}, {best_score:.0%} similar):\n{region}"
+
+
 def _fuzzy_find_block(search: str, content: str, threshold: float = 0.8) -> Optional[tuple[int, int]]:
     """Try to find an approximate match for a search block in content."""
     search_lines = search.strip().split("\n")
     content_lines = content.split("\n")
 
-    if len(search_lines) < 2:
-        return None
+    if len(search_lines) == 1:
+        threshold = max(threshold, 0.9)
 
     search_normalized = [line.strip() for line in search_lines if line.strip()]
     if not search_normalized:
