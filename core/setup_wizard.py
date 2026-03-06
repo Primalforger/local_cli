@@ -407,7 +407,7 @@ def _append_installed_extras(
             "max_ctx": 32768,
             "installed": True,
             "recommended": False,
-            "vram_est": size_gb or params * 0.56 + 0.5,
+            "vram_est": (size_gb + 0.5) if size_gb > 0 else (params * 0.56 + 0.5),
             "speed": speed,
             "quant": "Q4_K_M",
             "quant_tag": name,  # Use as-is — already installed

@@ -529,7 +529,7 @@ class ChatSession:
         self._current_plan = None
         self._router = None
         route_mode = config.get("route_mode", "manual")
-        if route_mode != "manual":
+        if route_mode in ("auto", "fast", "quality"):
             try:
                 from llm.model_router import ModelRouter
                 self._router = ModelRouter(
