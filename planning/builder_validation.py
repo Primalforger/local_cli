@@ -348,15 +348,15 @@ def run_validation_pipeline(
             "Build", "command", project_info["build_cmd"]
         ))
 
-    # Lint stage — prefer tool_lint (auto-detects all linters), fall back
+    # Lint stage — informational only, never blocks or triggers auto-fix
     if "lint" not in skip_stages:
         if _lint_tool:
-            stages.append(("Lint", "tool_func", (_lint_tool, "")))
+            stages.append(("Lint", "lint_info", (_lint_tool, "")))
         elif project_info.get("lint_cmd") and project_info.get(
             "type"
         ) in ("rust", "go"):
             stages.append((
-                "Lint", "command", project_info["lint_cmd"]
+                "Lint", "lint_info", project_info["lint_cmd"]
             ))
 
     # Test stage — prefer tool_run_tests (auto-detects runner), fall back
@@ -429,6 +429,10 @@ def run_validation_pipeline(
                     stage_name, attempt,
                     fix_history=stage_fix_history,
                 )
+            elif stage_type == "lint_info":
+                passed = _run_lint_info(
+                    stage_cmd, base_dir, stage_name,
+                )
             elif stage_type == "tool_func":
                 tfunc, targs = stage_cmd  # unpacked from tuple
                 passed = _validate_tool_func(
@@ -476,6 +480,41 @@ def run_validation_pipeline(
         "\n[bold green]✅ All validation passed![/bold green]"
     )
     return True
+
+
+def _run_lint_info(stage_cmd, base_dir: Path, stage_name: str) -> bool:
+    """Run lint as informational-only — never blocks, never auto-fixes."""
+    if isinstance(stage_cmd, tuple):
+        # tool_func: (func, args)
+        tool_func, tool_args = stage_cmd
+        original_dir = os.getcwd()
+        try:
+            os.chdir(str(base_dir))
+            result_text = tool_func(tool_args)
+        except Exception as e:
+            console.print(f"  [dim]Lint skipped: {e}[/dim]")
+            return True
+        finally:
+            os.chdir(original_dir)
+    else:
+        # command string
+        result = run_cmd(stage_cmd, cwd=str(base_dir))
+        result_text = (result.get("stdout", "") + "\n" + result.get("stderr", "")).strip()
+        if result["success"]:
+            result_text = f"[lint] clean (exit 0)\n{result_text}"
+
+    lines = result_text.strip().split("\n")
+    first_line = lines[0] if lines else ""
+
+    if _parse_tool_result(result_text):
+        console.print(f"  [green]\u2713 {stage_name} clean[/green]")
+    elif "not found" in first_line.lower() or "not installed" in first_line.lower():
+        console.print(f"  [dim]{stage_name} skipped (tool not available)[/dim]")
+    else:
+        console.print(f"  [yellow]\u2139 {stage_name}: {first_line}[/yellow]")
+        for line in lines[1:6]:
+            console.print(f"    [dim]{line}[/dim]")
+    return True  # Never block
 
 
 def _validate_xref(
