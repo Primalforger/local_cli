@@ -60,6 +60,22 @@ _background_servers: dict[int, dict] = {}  # port -> {process, command, started}
 _background_processes: dict[int, dict] = {}  # pid -> {process, command, started}
 
 
+def _reap_completed() -> None:
+    """Close file handles and remove entries for completed background processes."""
+    finished = [
+        pid for pid, info in _background_processes.items()
+        if info["process"].poll() is not None
+    ]
+    for pid in finished:
+        info = _background_processes.pop(pid)
+        log_fh = info.get("log_fh")
+        if log_fh and not log_fh.closed:
+            try:
+                log_fh.close()
+            except OSError:
+                pass
+
+
 def tool_run_command(args: str) -> str:
     """Run a shell command and return output."""
     command = _sanitize_tool_args(args)
@@ -97,6 +113,7 @@ def tool_run_command(args: str) -> str:
 
 def tool_run_background(args: str) -> str:
     """Run a command in the background, tracking its PID."""
+    _reap_completed()
     command = _sanitize_tool_args(args)
 
     if not command:
@@ -317,6 +334,7 @@ def tool_kill_process(args: str) -> str:
 
 def tool_list_processes(args: str) -> str:
     """List running processes (tracked background + optional filter)."""
+    _reap_completed()
     filter_str = _sanitize_tool_args(args).strip().lower()
 
     output_lines = []

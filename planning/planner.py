@@ -229,7 +229,12 @@ def _parse_plan_json(response: str) -> Optional[dict]:
         except json.JSONDecodeError:
             pass
 
-    # Try 3: Find outermost JSON object
+    # Try 3: Balanced-brace extraction (handles nested JSON reliably)
+    balanced = _extract_balanced_json(response)
+    if balanced is not None and isinstance(balanced, dict):
+        return balanced
+
+    # Try 4: Greedy regex fallback (outermost { ... })
     json_match = re.search(r'\{.*\}', response, re.DOTALL)
     if json_match:
         try:
@@ -244,6 +249,50 @@ def _parse_plan_json(response: str) -> Optional[dict]:
         "[dim]Tip: Try a larger model or simplify your description. "
         "Smaller models sometimes produce invalid JSON.[/dim]"
     )
+    return None
+
+
+def _extract_balanced_json(text: str) -> dict | None:
+    """Extract JSON by finding balanced braces — more reliable than regex."""
+    start = text.find('{')
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start, len(text)):
+        char = text[i]
+
+        if escape:
+            escape = False
+            continue
+
+        if char == '\\' and in_string:
+            escape = True
+            continue
+
+        if char == '"' and not escape:
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                try:
+                    result = json.loads(candidate)
+                    if isinstance(result, dict):
+                        return result
+                except json.JSONDecodeError:
+                    return None
+
     return None
 
 
@@ -300,6 +349,44 @@ def _validate_plan(plan: dict) -> tuple[bool, list[str]]:
             if step_id in seen_ids:
                 issues.append(f"Duplicate step ID: {step_id}")
             seen_ids.add(step_id)
+
+        # Validate dependency references and detect cycles
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            for dep in step.get("depends_on", []):
+                if dep not in seen_ids:
+                    issues.append(
+                        f"Step {step.get('id')} depends on "
+                        f"non-existent step {dep}"
+                    )
+
+        # DFS cycle detection
+        graph: dict[Any, list] = {
+            s.get("id"): s.get("depends_on", [])
+            for s in steps if isinstance(s, dict)
+        }
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color: dict[Any, int] = {nid: WHITE for nid in graph}
+
+        def _has_cycle(node: Any) -> bool:
+            color[node] = GRAY
+            for dep in graph.get(node, []):
+                if dep not in color:
+                    continue
+                if color[dep] == GRAY:
+                    return True
+                if color[dep] == WHITE and _has_cycle(dep):
+                    return True
+            color[node] = BLACK
+            return False
+
+        for node_id in graph:
+            if color.get(node_id) == WHITE and _has_cycle(node_id):
+                issues.append(
+                    "Circular dependency detected in plan steps"
+                )
+                break
 
     # Ensure optional fields have defaults
     plan.setdefault("description", "")

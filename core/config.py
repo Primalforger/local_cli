@@ -410,7 +410,27 @@ def load_config() -> dict:
     # Layer 1: Environment variables (override everything)
     _apply_env_overrides(config)
 
+    # Cross-field validation
+    _validate_cross_fields(config)
+
     return config
+
+
+def _validate_cross_fields(config: dict) -> None:
+    """Validate cross-field constraints and reset to defaults if violated."""
+    warn = config.get("context_warn_threshold", 0.75)
+    compact = config.get("context_compact_threshold", 0.85)
+    force = config.get("context_force_threshold", 0.95)
+
+    if not (warn < compact < force):
+        console.print(
+            f"[yellow]Context thresholds out of order "
+            f"(warn={warn}, compact={compact}, force={force}) "
+            f"— resetting to defaults (0.75, 0.85, 0.95)[/yellow]"
+        )
+        config["context_warn_threshold"] = 0.75
+        config["context_compact_threshold"] = 0.85
+        config["context_force_threshold"] = 0.95
 
 
 def _apply_env_overrides(config: dict):

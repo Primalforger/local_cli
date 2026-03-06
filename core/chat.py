@@ -1109,6 +1109,11 @@ class ChatSession:
                     + result_text
                 ),
             })
+        else:
+            console.print(
+                f"\n[yellow]Tool loop reached {self.max_tool_iterations} "
+                f"iterations — stopping.[/yellow]"
+            )
 
         self._hallucination_retries = 0
 

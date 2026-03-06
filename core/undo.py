@@ -100,8 +100,13 @@ class UndoManager:
         if not messages:
             return
 
+        try:
+            messages_copy = copy.deepcopy(messages)
+        except Exception:
+            messages_copy = [dict(m) for m in messages]
+
         snapshot = ConversationSnapshot(
-            messages=copy.deepcopy(messages),
+            messages=messages_copy,
             timestamp=datetime.now().strftime("%H:%M:%S"),
             label=label,
             model=model,

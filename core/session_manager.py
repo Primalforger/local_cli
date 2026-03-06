@@ -43,7 +43,7 @@ def _get_index_path() -> Path:
 
 
 def _load_index() -> dict:
-    """Load the search index, returning empty index on missing/corrupt."""
+    """Load the search index; auto-rebuild on missing/corrupt/version mismatch."""
     path = _get_index_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -51,7 +51,8 @@ def _load_index() -> dict:
             return data
     except (OSError, json.JSONDecodeError, KeyError):
         pass
-    return {"version": _INDEX_VERSION, "files": {}, "tokens": {}}
+    # Index missing, corrupt, or version mismatch — rebuild
+    return rebuild_index()
 
 
 def _save_index(index: dict) -> None:
@@ -124,8 +125,12 @@ def _remove_from_index(filenames: list[str]) -> None:
     _save_index(index)
 
 
-def _rebuild_index() -> None:
-    """Full rebuild of the search index from disk (for manual use)."""
+def rebuild_index() -> dict:
+    """Full rebuild of the search index from disk.
+
+    Returns:
+        The rebuilt index dict.
+    """
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     index: dict = {"version": _INDEX_VERSION, "files": {}, "tokens": {}}
     for path in SESSIONS_DIR.glob("*.json"):
@@ -149,6 +154,7 @@ def _rebuild_index() -> None:
         except (json.JSONDecodeError, OSError):
             continue
     _save_index(index)
+    return index
 
 
 def save_session(

@@ -7,6 +7,7 @@ and metrics tracking from the 4 duplicate streaming implementations.
 
 import json
 import time
+from collections import OrderedDict
 from typing import Callable, Protocol, runtime_checkable
 
 import httpx
@@ -89,8 +90,8 @@ class LLMBackend(Protocol):
 
 # ── Ollama Backend Implementation ─────────────────────────────
 
-# Token cache shared across OllamaBackend instances
-_token_cache: dict[int, int] = {}
+# Token cache shared across OllamaBackend instances (LRU via OrderedDict)
+_token_cache: OrderedDict[int, int] = OrderedDict()
 _TOKEN_CACHE_MAX = 1000
 
 
@@ -317,6 +318,7 @@ class OllamaBackend:
         """Get exact token count from Ollama's tokenize endpoint."""
         text_hash = hash(text)
         if text_hash in _token_cache:
+            _token_cache.move_to_end(text_hash)
             return _token_cache[text_hash]
 
         try:
@@ -329,11 +331,9 @@ class OllamaBackend:
             tokens = resp.json().get("tokens", [])
             count = len(tokens)
 
-            # Cache management
-            if len(_token_cache) >= _TOKEN_CACHE_MAX:
-                keys = list(_token_cache.keys())
-                for k in keys[:_TOKEN_CACHE_MAX // 2]:
-                    del _token_cache[k]
+            # LRU cache management — evict oldest entries
+            while len(_token_cache) >= _TOKEN_CACHE_MAX:
+                _token_cache.popitem(last=False)
             _token_cache[text_hash] = count
             return count
         except Exception:

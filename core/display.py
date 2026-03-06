@@ -328,3 +328,44 @@ def display_compact_status() -> str:
     if parts:
         return " │ ".join(parts)
     return "defaults"
+
+
+# ── Persistence ────────────────────────────────────────────────
+
+def load_display_config(config: dict) -> None:
+    """Apply saved display settings from a config dict.
+
+    Reads 'display_verbosity' and 'display_toggles' keys.
+    """
+    verbosity_name = config.get("display_verbosity")
+    if verbosity_name is not None:
+        resolved = _VERBOSITY_MAP.get(str(verbosity_name).lower().strip())
+        if resolved is not None:
+            _state.apply_verbosity(resolved)
+
+    toggles = config.get("display_toggles")
+    if isinstance(toggles, dict):
+        for name, value in toggles.items():
+            attr_name = _TOGGLE_MAP.get(name)
+            if attr_name is not None and isinstance(value, bool):
+                setattr(_state, attr_name, value)
+
+
+def get_display_config() -> dict:
+    """Return current display settings as a dict for saving.
+
+    Returns dict with 'display_verbosity' and 'display_toggles' keys.
+    """
+    return {
+        "display_verbosity": _state.verbosity.name.lower(),
+        "display_toggles": {
+            "thinking": _state.thinking,
+            "previews": _state.previews,
+            "diffs": _state.diffs,
+            "metrics": _state.metrics,
+            "scan": _state.scan_details,
+            "tools": _state.tool_output,
+            "streaming": _state.streaming,
+            "routing": _state.routing,
+        },
+    }

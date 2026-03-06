@@ -289,19 +289,18 @@ def _parse_json_response(response: str, label: str = "response") -> Optional[dic
         except json.JSONDecodeError:
             pass
 
-    # Try 3: Find the outermost JSON object using brace matching
-    # (re.DOTALL with greedy .* grabs the LARGEST match, which is correct
-    # for nested JSON, but can grab trailing garbage — so we try both)
+    # Try 3: Balanced-brace extraction first (handles nested JSON reliably)
+    balanced = _extract_balanced_json(response)
+    if balanced is not None:
+        return balanced
+
+    # Try 4: Greedy regex fallback (outermost { ... })
     json_match = re.search(r'\{.*\}', response, re.DOTALL)
     if json_match:
-        candidate = json_match.group()
         try:
-            return json.loads(candidate)
+            return json.loads(json_match.group())
         except json.JSONDecodeError:
-            # Try to find balanced braces manually
-            parsed = _extract_balanced_json(response)
-            if parsed is not None:
-                return parsed
+            pass
 
     console.print(
         f"[red]Could not parse {label} JSON from model response.[/red]"
