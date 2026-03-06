@@ -244,7 +244,6 @@ def tool_edit_file(args: str) -> str:
     if not matches:
         return "Error: No valid SEARCH/REPLACE blocks found."
 
-    original_content = content
     changes = 0
     failed_searches = []
 
@@ -303,10 +302,15 @@ def tool_edit_file(args: str) -> str:
             content_lines = content.split("\n")
 
             # Re-indent replacement to match the original file's indentation
-            search_first = search_clean.split("\n")[0]
-            original_first = content_lines[start_line]
-            search_indent = len(search_first) - len(search_first.lstrip())
-            original_indent = len(original_first) - len(original_first.lstrip())
+            # Use first non-empty line for indent detection (empty lines have 0 indent)
+            search_indent = 0
+            original_indent = 0
+            for k, sline in enumerate(search_clean.split("\n")):
+                if sline.strip():
+                    search_indent = len(sline) - len(sline.lstrip())
+                    orig_line = content_lines[start_line + k]
+                    original_indent = len(orig_line) - len(orig_line.lstrip())
+                    break
             indent_diff = original_indent - search_indent
 
             replace_lines = replace_clean.split("\n")
