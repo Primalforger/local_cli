@@ -256,6 +256,11 @@ def tool_edit_file(args: str) -> str:
         if replace_clean.startswith("```") and replace_clean.endswith("```"):
             replace_clean = _clean_fences(replace_clean).rstrip("\n")
 
+        # Empty SEARCH block guard
+        if not search_clean.strip():
+            failed_searches.append("(empty SEARCH block — nothing to match)")
+            continue
+
         # Whole-file guard — reject SEARCH blocks that cover most of the file
         search_line_count = search_clean.count("\n") + 1
         file_line_count = content.count("\n") + 1
@@ -331,17 +336,19 @@ def tool_edit_file(args: str) -> str:
             continue
 
         # Line-number prefix stripping
+        # Strip all lines with \d+, but only activate when \d{2,} confirms
+        # line-number formatting (avoids false positives on code like `0: val`)
         stripped_search_lines = []
         has_line_nums = False
         for line in search_clean.split("\n"):
-            cleaned = re.sub(r'^\s*\d{2,}\s*[|:]\s?', '', line)
-            if cleaned != line:
+            cleaned = re.sub(r'^\s*\d+\s*[|:]\s?', '', line)
+            if cleaned != line and re.match(r'^\s*\d{2,}\s*[|:]', line):
                 has_line_nums = True
             stripped_search_lines.append(cleaned)
 
         if has_line_nums:
             search_no_nums = "\n".join(stripped_search_lines)
-            if search_no_nums in content:
+            if search_no_nums.strip() and search_no_nums in content:
                 content = content.replace(search_no_nums, replace_clean, 1)
                 changes += 1
                 console.print(f"[yellow]Matched after stripping line numbers in {filepath}[/yellow]")
